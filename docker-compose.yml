@@ -1,6 +1,35 @@
 services:
   # ---------------------------------------------------------------------------
-  # 1. Dagster Orchestration Engine
+  # 1. Distributed Dask Scheduler & Worker
+  # ---------------------------------------------------------------------------
+  dask-scheduler:
+    build:
+      context: .
+      dockerfile: apps/pipeline/Dockerfile
+    container_name: portfolio-dask-scheduler
+    restart: unless-stopped
+    command: ["dask", "scheduler"]
+    ports:
+      - "8786:8786"
+      - "8787:8787"
+
+  dask-worker:
+    build:
+      context: .
+      dockerfile: apps/pipeline/Dockerfile
+    container_name: portfolio-dask-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./apps/pipeline:/opt/dagster/app
+      - ./packages/portfolio-core:/packages/portfolio-core
+    command: ["dask", "worker", "tcp://dask-scheduler:8786", "--nworkers", "1", "--nthreads", "4", "--memory-limit", "2GB"]
+    depends_on:
+      - dask-scheduler
+
+  # ---------------------------------------------------------------------------
+  # 2. Dagster Orchestration Engine
   # ---------------------------------------------------------------------------
   dagster-pipeline:
     build:
@@ -16,9 +45,11 @@ services:
       - dagster_storage:/opt/dagster/dagster_home
     ports:
       - "3000:3000"
+    depends_on:
+      - dask-scheduler
 
   # ---------------------------------------------------------------------------
-  # 2. Streamlit Risk & Volatility Analytics Dashboard
+  # 3. Streamlit Risk & Volatility Analytics Dashboard
   # ---------------------------------------------------------------------------
   risk-dashboard:
     build:

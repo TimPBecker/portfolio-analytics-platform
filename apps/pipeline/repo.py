@@ -62,8 +62,25 @@ from reporting import (
 import os
 import yaml
 
-DASK_SCHEDULER_URI = "tcp://dask-scheduler:8786"
+DASK_SCHEDULER_URI = os.getenv("DASK_SCHEDULER_URI", "tcp://dask-scheduler:8786")
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.yaml")
+
+
+def get_dask_client(logger=None, timeout: str = "4s") -> Client:
+    """
+    Connects to the distributed Dask scheduler if available.
+    If the remote scheduler is unreachable, seamlessly creates a local threaded Dask Client.
+    """
+    uri = os.getenv("DASK_SCHEDULER_URI", DASK_SCHEDULER_URI)
+    try:
+        client = Client(uri, timeout=timeout)
+        if logger:
+            logger.info(f"Connected to distributed Dask scheduler at {uri}")
+        return client
+    except Exception as e:
+        if logger:
+            logger.warning(f"Could not connect to Dask scheduler at {uri} ({e}). Falling back to local Dask client.")
+        return Client(processes=False)
 
 
 def load_pipeline_config(config_file: str = CONFIG_FILE) -> dict:
@@ -170,7 +187,7 @@ def portfolio_stock_data(config: StockDataConfig, db: DatabaseResource):
     logger.info(f"Ensuring at least {config.history_days} historical trading days of continuous price history...")
     
     logger.info("Connecting to Dask cluster...")
-    client = Client(DASK_SCHEDULER_URI)
+    client = get_dask_client(logger=logger)
     
     delayed_tasks = []
     for ticker in all_tickers:
@@ -241,7 +258,7 @@ def portfolio_fx_rates(db: DatabaseResource):
     logger.info(f"Foreign currencies to fetch FX rates against GBP: {currencies}")
     
     logger.info("Connecting to Dask cluster...")
-    client = Client(DASK_SCHEDULER_URI)
+    client = get_dask_client(logger=logger)
     
     delayed_tasks = []
     for curr in currencies:

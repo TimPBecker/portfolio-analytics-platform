@@ -23,6 +23,7 @@ COPY apps/pipeline /opt/dagster/app
 ENV DAGSTER_HOME=/opt/dagster/dagster_home
 RUN mkdir -p $DAGSTER_HOME
 
-EXPOSE 3000
+EXPOSE 3000 8786 8787
 
+ENTRYPOINT []
 CMD ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "repo.py"]
