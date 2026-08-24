@@ -119,16 +119,17 @@ st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
 # Main Navigation Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Rolling Volatility",
+    "💼 Portfolio & Correlation",
     "🛡️ Value-at-Risk Spectrum",
     "📊 Levels, Returns & Histogram",
-    "💼 Portfolio & Correlation"
+    "📈 Rolling Volatility"
 ])
 
 with tab1:
-    render_tab_volatility(
+    render_tab_portfolio(
         prices_gbp=prices_gbp,
-        available_tickers=available_tickers
+        positions=positions,
+        asof_date=latest_date_str
     )
 
 with tab2:
@@ -145,8 +146,7 @@ with tab3:
     )
 
 with tab4:
-    render_tab_portfolio(
+    render_tab_volatility(
         prices_gbp=prices_gbp,
-        positions=positions,
-        asof_date=latest_date_str
+        available_tickers=available_tickers
     )
