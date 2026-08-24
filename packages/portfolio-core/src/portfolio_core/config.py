@@ -30,18 +30,12 @@ def find_config_path(start_path: Optional[str] = None) -> Path:
 
 
 def find_env_path(start_path: Optional[str] = None) -> Optional[Path]:
-    """Finds .env file by searching upwards."""
+    """Finds .env file by searching upwards to the repository root."""
     current = Path(start_path).resolve() if start_path else Path.cwd().resolve()
     for p in [current, *current.parents[:4]]:
         cand = p / ".env"
         if cand.is_file():
             return cand
-        cand_app = p / "apps" / "pipeline" / ".env"
-        if cand_app.is_file():
-            return cand_app
-        cand_dash = p / "apps" / "dashboard" / ".env"
-        if cand_dash.is_file():
-            return cand_dash
     return None
 
 
