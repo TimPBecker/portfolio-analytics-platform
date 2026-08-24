@@ -9,12 +9,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements and install Python packages
-COPY requirements.txt .
+# Copy shared core package and install it
+COPY packages/portfolio-core /packages/portfolio-core
+RUN pip install --no-cache-dir -e /packages/portfolio-core
+
+# Copy dashboard dependencies and install
+COPY apps/dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source code
-COPY . .
+# Copy dashboard application source code
+COPY apps/dashboard /app
 
 # Expose Streamlit default port
 EXPOSE 8501
