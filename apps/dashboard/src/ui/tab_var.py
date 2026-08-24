@@ -242,9 +242,9 @@ def render_tab_var(
     with col_view1:
         component_metric_choice = st.selectbox(
             "Select Component Risk Measure:",
-            options=["Shapley Risk Contributions (Game-Theoretic)", "Standalone VaR Figures (Isolated Risk)"],
+            options=["Shapley Risk Contributions", "Standalone VaR Figures"],
             index=0,
-            help="Toggle between game-theoretic Shapley marginal risk contributions (default) and standalone isolated asset risk."
+            help="Toggle between Shapley marginal risk contributions (default) and standalone isolated asset risk."
         )
 
     # Check database for stored component risk contributions
