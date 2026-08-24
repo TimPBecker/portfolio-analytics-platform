@@ -546,6 +546,7 @@ def render_tab_var(
     col_s1, col_s2 = st.columns([1.5, 1.5])
 
     with col_s1:
+        st.markdown(f"##### Empirical Scenario P&L Distribution ({scen_asof_date})")
         fig_hist = go.Figure()
         fig_hist.add_trace(
             go.Histogram(
@@ -569,14 +570,30 @@ def render_tab_var(
         )
 
         # Add vertical cutoffs for 95% VaR
-        fig_hist.add_vline(x=h_95, line_dash="dash", line_color="#EF4444", line_width=1.5, annotation_text="Hist 95%", annotation_position="top left")
-        fig_hist.add_vline(x=v_95, line_dash="dash", line_color="#3B82F6", line_width=1.5, annotation_text="Scaled 95%", annotation_position="top right")
+        fig_hist.add_vline(
+            x=h_95, line_dash="dash", line_color="#EF4444", line_width=1.5,
+            annotation_text="Hist 95%", annotation_position="top left",
+            annotation_font=dict(size=10, color="#EF4444")
+        )
+        fig_hist.add_vline(
+            x=v_95, line_dash="dash", line_color="#3B82F6", line_width=1.5,
+            annotation_text="Scaled 95%", annotation_position="top right",
+            annotation_font=dict(size=10, color="#3B82F6")
+        )
 
         layout_hist = get_plotly_layout_defaults()
         layout_hist.update(dict(
-            title=dict(text=f"Empirical Scenario P&L Distribution (As-Of: {scen_asof_date})", font=dict(size=13, color="#0F172A")),
             barmode="overlay",
-            height=400
+            height=400,
+            margin=dict(l=45, r=30, t=35, b=40),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1.0,
+                font=dict(size=10)
+            )
         ))
         fig_hist.update_layout(**layout_hist)
         fig_hist.update_xaxes(title_text="Simulated Daily P&L (£)", tickprefix="£")
