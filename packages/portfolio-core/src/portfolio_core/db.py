@@ -31,24 +31,19 @@ def get_connection_string(
     Supports both 'mariadb' / 'mysql' and 'sqlite' (must end in .s3db).
     All non-secret parameters are loaded from config.yaml without hardcoded code defaults.
     The secret password is read from the DB_PASSWORD environment variable for MariaDB.
-    Raises ValueError / FileNotFoundError if any required parameter or config is missing.
     """
-    cfg_file = config_path or os.path.join(os.path.dirname(__file__), "config.yaml")
-    loaded_cfg = {}
-    if os.path.exists(cfg_file):
-        import yaml
-        with open(cfg_file, "r") as f:
-            loaded_cfg = yaml.safe_load(f) or {}
+    from portfolio_core.config import get_db_config, load_config
+    loaded_cfg = load_config(config_path) if config_path else {}
+    db_cfg = get_db_config(loaded_cfg) if loaded_cfg else get_db_config()
 
-    db_cfg = loaded_cfg.get("resources", {}).get("db", {}).get("config", {})
     t = (db_type or db_cfg.get("type") or "mariadb").lower()
 
     if t == "sqlite":
         sp = sqlite_path or db_cfg.get("sqlite_path")
         if not sp:
             raise ValueError(
-                f"Database configuration error: Missing 'sqlite_path' for SQLite database in '{cfg_file}'. "
-                "Please specify resources.db.config.sqlite_path."
+                "Database configuration error: Missing 'sqlite_path' for SQLite database. "
+                "Please specify sqlite_path in config.yaml."
             )
         if not sp.endswith(".s3db"):
             raise ValueError(
@@ -63,7 +58,7 @@ def get_connection_string(
     if hasattr(p, "get_value"):
         p = p.get_value()
     elif not p:
-        p = os.getenv("DB_PASSWORD")
+        p = os.getenv("DB_PASSWORD") or db_cfg.get("password")
     h = host or os.getenv("DB_HOST") or db_cfg.get("host")
     prt = port or (int(os.getenv("DB_PORT")) if os.getenv("DB_PORT") else None) or db_cfg.get("port")
     db = database or os.getenv("DB_NAME") or db_cfg.get("database")
