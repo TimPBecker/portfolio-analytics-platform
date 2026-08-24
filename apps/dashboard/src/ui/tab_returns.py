@@ -422,7 +422,14 @@ def render_tab_returns(
 
         shock_records = []
         for d, r in best_5.items():
-            shock_records.append({"Date": d.strftime("%Y-%m-%d"), "Type": "Gain 🟢", "Return": f"{r*100:+.2f}%", "Impact": f"{abs(r)/std_val:.1f}σ Shock"})
+            d_str = pd.to_datetime(d).strftime("%Y-%m-%d")
+            impact_str = f"{abs(r) / std_val:.1f}σ" if std_val > 0 else "-"
+            shock_records.append({"Date": d_str, "Type": "Gain 🟢", "Daily Return": f"{r * 100.0:+.2f}%", "Magnitude": impact_str})
+        for d, r in worst_5.items():
+            d_str = pd.to_datetime(d).strftime("%Y-%m-%d")
+            impact_str = f"{abs(r) / std_val:.1f}σ" if std_val > 0 else "-"
+            shock_records.append({"Date": d_str, "Type": "Loss 🔴", "Daily Return": f"{r * 100.0:+.2f}%", "Magnitude": impact_str})
+
         st.dataframe(pd.DataFrame(shock_records), use_container_width=True, hide_index=True)
 
     # -------------------------------------------------------------------------
