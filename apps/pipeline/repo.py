@@ -1,5 +1,5 @@
 """
-Dagster repository and pipeline orchestration for pi-dagster-dask.
+Dagster repository and pipeline orchestration for Portfolio-Analytics-Platform.
 Defines assets, jobs, and daily schedules, consuming database interaction
 functions from the standalone db module.
 """

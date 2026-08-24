@@ -1,5 +1,5 @@
 """
-Portfolio Reporting and Telegram Notification Module for pi-dagster-dask.
+Portfolio Reporting and Telegram Notification Module for Portfolio-Analytics-Platform.
 Generates multi-panel financial visual reports (Portfolio Valuations & Value-at-Risk)
 and delivers them with formatted summary captions to configured Telegram recipients.
 """
@@ -679,7 +679,7 @@ def format_telegram_caption(
             )
 
     caption_lines.append("")
-    caption_lines.append("🤖 <i>Automated update by pi-dagster-dask</i>")
+    caption_lines.append("🤖 <i>Automated update by the Portfolio-Analytics-Platform</i>")
     return "\n".join(caption_lines)
 
 

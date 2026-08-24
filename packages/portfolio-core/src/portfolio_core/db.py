@@ -1,5 +1,5 @@
 """
-Database access and financial calculation module for pi-dagster-dask.
+Database access and financial calculation module for Portfolio-Analytics-Platform.
 Provides standalone database interaction, data ingestion, backfilling,
 dividend cashflow collection, and portfolio valuation independent of Dagster.
 """
