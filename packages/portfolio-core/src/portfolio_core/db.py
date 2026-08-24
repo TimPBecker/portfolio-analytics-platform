@@ -942,7 +942,7 @@ def collect_and_store_dividend_cashflows_and_cash_account(backfill_days: int = 0
     min_price_date = str(all_price_dates[0]) if all_price_dates and all_price_dates[0] else str(tx_df["TRANSACTION_DATE"].min())
     start_date = min(tx_df["TRANSACTION_DATE"].min(), min_price_date)
     end_date = max(tx_df["TRANSACTION_DATE"].max(), max_price_date)
-    full_date_range = pd.date_range(start=start_date, end=end_date, freq="D").strftime("%Y-%m-%d")
+    full_date_range = pd.date_range(start=start_date, end=end_date, freq="B").strftime("%Y-%m-%d")
     tx_grid = tx_pivot.reindex(full_date_range).fillna(0).cumsum()
     
     holdings_long = tx_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="SHARES")
@@ -1198,7 +1198,7 @@ def calculate_and_store_daily_portfolio_values(backfill_days: int = 0, engine=No
     
     start_date = min(tx_df["TRANSACTION_DATE"].min(), dates_sorted[0])
     end_date = dates_sorted[-1]
-    full_date_range = pd.date_range(start=start_date, end=end_date, freq="D").strftime("%Y-%m-%d")
+    full_date_range = pd.date_range(start=start_date, end=end_date, freq="B").strftime("%Y-%m-%d")
     tx_grid = tx_pivot.reindex(full_date_range).fillna(0).cumsum()
     
     holdings_long = tx_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="SHARES")
