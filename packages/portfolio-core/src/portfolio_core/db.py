@@ -91,6 +91,17 @@ def get_engine(connection_string=None):
     return create_engine(connection_string or get_connection_string())
 
 
+def test_db_connection(engine: Optional[Engine] = None) -> Tuple[bool, str]:
+    """Tests if the database connection is alive and returns status message."""
+    try:
+        eng = engine or get_engine()
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "Connected successfully"
+    except Exception as e:
+        return False, str(e)
+
+
 def create_all_tables(engine=None):
     """Ensures that all necessary database tables exist in MariaDB/MySQL or SQLite."""
     engine = get_engine(engine)
