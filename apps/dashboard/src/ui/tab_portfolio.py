@@ -1,5 +1,5 @@
 """
-Tab 4: Portfolio Holdings, Allocations, Historical Valuation & Correlation Matrix View.
+Tab 1: Portfolio Holdings, Allocations & Historical Valuation View.
 """
 
 from typing import List, Optional, Dict, Any
@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 
 from portfolio_core.db import fetch_portfolio_values_history
 from src.ui.theme import PALETTE, get_plotly_layout_defaults
@@ -18,9 +17,9 @@ def render_tab_portfolio(
     positions: Dict[str, float],
     asof_date: Optional[str] = None
 ):
-    """Renders the Portfolio Allocations, History & Correlation view."""
-    st.markdown("### 💼 Portfolio Composition & Asset Correlation")
-    st.caption("Overview of current holdings, portfolio valuation trajectory, and cross-asset return correlation matrix.")
+    """Renders the Portfolio Allocations and Valuation History view."""
+    st.markdown("### 💼 Portfolio Holdings & Historical Valuation")
+    st.caption("Overview of current holdings, weight allocation breakdown, and portfolio valuation trajectory.")
 
     if prices_gbp.empty or not positions:
         st.warning("Insufficient price data or active positions.")
@@ -119,30 +118,3 @@ def render_tab_portfolio(
         fig_pv.update_layout(**layout_pv)
         fig_pv.update_yaxes(title_text="Portfolio Value (£)", tickprefix="£")
         st.plotly_chart(fig_pv, use_container_width=True)
-
-    # -------------------------------------------------------------------------
-    # 3. Cross-Asset Return Correlation Heatmap
-    # -------------------------------------------------------------------------
-    st.markdown("#### 🔥 Cross-Asset Daily Return Correlation Heatmap")
-    st.caption("Pearson correlation coefficients across all active holdings over the last 1 year of daily returns.")
-
-    # Calculate returns for top holdings
-    top_tickers = list(top_holdings.head(15).index)
-    p_sub = prices_gbp[top_tickers].iloc[-260:]
-    rets_sub = np.log(p_sub / p_sub.shift(1)).dropna()
-    corr_matrix = rets_sub.corr()
-
-    fig_corr = px.imshow(
-        corr_matrix,
-        text_auto=".2f",
-        aspect="auto",
-        color_continuous_scale="Blues",
-        labels=dict(x="Asset", y="Asset", color="Correlation")
-    )
-    layout_corr = get_plotly_layout_defaults()
-    layout_corr.update(dict(
-        title=dict(text="Asset Return Correlation Matrix (260 Trading Days)", font=dict(size=14, color="#0F172A")),
-        height=520
-    ))
-    fig_corr.update_layout(**layout_corr)
-    st.plotly_chart(fig_corr, use_container_width=True)

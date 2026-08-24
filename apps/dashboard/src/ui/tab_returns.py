@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 
 from portfolio_core.analytics.statistics import (
@@ -422,7 +423,63 @@ def render_tab_returns(
         shock_records = []
         for d, r in best_5.items():
             shock_records.append({"Date": d.strftime("%Y-%m-%d"), "Type": "Gain 🟢", "Return": f"{r*100:+.2f}%", "Impact": f"{abs(r)/std_val:.1f}σ Shock"})
-        for d, r in worst_5.items():
-            shock_records.append({"Date": d.strftime("%Y-%m-%d"), "Type": "Loss 🔴", "Return": f"{r*100:+.2f}%", "Impact": f"{abs(r)/std_val:.1f}σ Shock"})
-
         st.dataframe(pd.DataFrame(shock_records), use_container_width=True, hide_index=True)
+
+    # -------------------------------------------------------------------------
+    # 7. Cross-Asset Return Correlation Matrix Heatmap
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 🔥 Cross-Asset Daily Return Correlation Heatmap")
+    st.caption("Pearson correlation coefficients across multiple assets over the selected historical lookback window.")
+
+    if not prices_gbp.empty and len(prices_gbp.columns) > 1:
+        corr_col1, corr_col2 = st.columns([2.0, 1.0])
+        with corr_col1:
+            default_corr = [t for t in available_tickers if t in prices_gbp.columns][:15]
+            corr_tickers = st.multiselect(
+                "Select Assets for Correlation Matrix:",
+                options=list(prices_gbp.columns),
+                default=default_corr,
+                key="tab_returns_corr_tickers"
+            )
+        with corr_col2:
+            corr_window = st.selectbox(
+                "Correlation Lookback Window:",
+                options=["3 Months (63 Days)", "6 Months (126 Days)", "1 Year (260 Days)", "2 Years (520 Days)", "All Available"],
+                index=2,
+                key="tab_returns_corr_window"
+            )
+
+        if len(corr_tickers) >= 2:
+            window_days = 260
+            if "3 Months" in corr_window:
+                window_days = 63
+            elif "6 Months" in corr_window:
+                window_days = 126
+            elif "2 Years" in corr_window:
+                window_days = 520
+            elif "All Available" in corr_window:
+                window_days = len(prices_gbp)
+
+            p_sub = prices_gbp[corr_tickers].iloc[-window_days:]
+            rets_sub = np.log(p_sub / p_sub.shift(1)).dropna()
+            corr_matrix = rets_sub.corr()
+
+            fig_corr = px.imshow(
+                corr_matrix,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale="Blues",
+                labels=dict(x="Asset", y="Asset", color="Correlation")
+            )
+            layout_corr = get_plotly_layout_defaults()
+            layout_corr.update(dict(
+                height=min(650, max(380, len(corr_tickers) * 32 + 100)),
+                margin=dict(l=40, r=40, t=30, b=40)
+            ))
+            fig_corr.update_layout(**layout_corr)
+            st.plotly_chart(fig_corr, use_container_width=True)
+        else:
+            st.info("Please select at least 2 assets to generate the correlation matrix.")
+    elif len(prices_gbp.columns) == 1:
+        st.info("Single-asset mode active. Additional assets will appear here when more holdings or market tickers are loaded.")

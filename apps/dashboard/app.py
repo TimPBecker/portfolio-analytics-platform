@@ -119,7 +119,7 @@ st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
 # Main Navigation Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "💼 Portfolio & Correlation",
+    "💼 Portfolio Holdings & Valuation",
     "🛡️ Value-at-Risk Spectrum",
     "📊 Levels, Returns & Histogram",
     "📈 Rolling Volatility"
