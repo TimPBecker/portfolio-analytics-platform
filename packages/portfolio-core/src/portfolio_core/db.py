@@ -7,11 +7,13 @@ dividend cashflow collection, and portfolio valuation independent of Dagster.
 import os
 from urllib.parse import quote_plus
 from datetime import date
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any, Union
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import time
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 
 def get_connection_string(
