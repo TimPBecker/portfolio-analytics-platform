@@ -1,0 +1,106 @@
+# =====================================================================
+# Dagster Pipeline Configuration (config.yaml)
+# =====================================================================
+# This file configures execution parameters and infrastructure topology.
+# Pass this file when running via CLI:
+#   dagster asset materialize -c config.yaml --select portfolio_value_at_risk
+# Or paste these blocks into the Dagster UI Launchpad config editor.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 1. Database Resource Configuration (Configurable MariaDB or SQLite)
+# ---------------------------------------------------------------------
+resources:
+  db:
+    config:
+      # Database backend type: 'mariadb' (or 'mysql') | 'sqlite'
+      type: "mariadb"
+
+      # --- MariaDB / MySQL Configuration (Active) ---
+      host: "192.168.178.40"
+      port: 3306
+      user: "stocks"
+      database: "stocks"
+      # Password secret is read from DB_PASSWORD in .env
+
+      # --- SQLite Configuration (Commented out template) ---
+      # To switch to a local SQLite database, set type: "sqlite" above and uncomment below:
+      # type: "sqlite"
+      # sqlite_path: "stocks.s3db"  # Note: Must always have the extension .s3db
+
+# ---------------------------------------------------------------------
+# 2. Asset Execution Configuration (Backfill & Risk Parameters)
+# ---------------------------------------------------------------------
+ops:
+  # Configuration for Asset Prices Ingestion & Backfilling
+  portfolio_stock_data:
+    config:
+      # history_days:
+      #   Number of historical trading days to maintain for all tickers ever seen in TRANSACTIONS.
+      history_days: 520
+
+  # Configuration for Portfolio Daily Valuation & Cash Account Backfill
+  portfolio_daily_values:
+    config:
+      # backfill_days:
+      #   0  -> (Default) No backfill; only calculate and store today's valuation & cash.
+      #   N  -> Backfills portfolio values and cash account for the last N days (e.g., 30, 90).
+      #   -1 -> Backfills all available historical dates.
+      backfill_days: 520
+
+  # Configuration for Value-at-Risk & Shapley Risk Contributions Asset
+  portfolio_value_at_risk:
+    config:
+      # backfill_days:
+      #   0  -> (Default) No backfill; only calculate risk metrics for today.
+      #   N  -> Backfills the last N missing historical dates (e.g., 10, 30).
+      #   -1 -> Backfills all missing historical dates.
+      backfill_days: 520
+
+      # min_lookback_days:
+      #   Minimum number of historical price observations required before calculating VaR.
+      min_lookback_days: 260
+
+      # lookback_days:
+      #   Number of historical daily return observations used in the simulation window.
+      lookback_days: 260
+
+      # num_permutations:
+      #   Number of permutation samples for Shapley Value game-theoretic attribution.
+      num_permutations: 100
+
+      # --- Configurable Percentile Ranges ---
+      # VaR Percentiles: All percentiles from var_min_percentile to var_max_percentile
+      # will be calculated for every date (e.g. 0.01 to 0.99 calculates all 99 percentiles).
+      var_min_percentile: 0.01
+      var_max_percentile: 0.99
+
+      # Shapley Attribution Percentiles: All percentiles from shapley_min_percentile to
+      # shapley_max_percentile will be calculated (e.g. 0.95 to 0.95 calculates 95% Shapley attribution).
+      shapley_min_percentile: 0.99
+      shapley_max_percentile: 0.99
+
+  # Configuration for Telegram Portfolio & Risk Report Asset (Final Step)
+  portfolio_telegram_report:
+    config:
+      # enabled:
+      #   Set to true to generate visual charts and send Telegram reports upon pipeline completion.
+      #   Set to false to skip reporting.
+      enabled: true
+
+      # recipients:
+      #   List of Telegram chat IDs / user IDs / group channel IDs to receive the report.
+      #   Example: ["123456789", "-100987654321"]
+      recipients: ["8903825328"]
+
+      # Telegram Bot Token is loaded securely from TELEGRAM_BOT_TOKEN environment variable in .env
+      # bot_token: Optional override if needed
+
+      # Historical chart window parameters:
+      portfolio_history_days: 14    # Days to display in top valuation chart (2 weeks)
+      var_history_days: 130         # Days to display in middle VaR chart (6 months / ~130 trading days)
+      confidence_levels: [0.01, 0.05, 0.95, 0.99] # Percentiles to report/plot (1%, 5%, 95%, 99%)
+      top_risk_contributors_n: 5    # Top risk contributor positions to include in table
+      top_movers_n: 5               # Top daily position value movers (|ΔValue|) to include in caption
+
+

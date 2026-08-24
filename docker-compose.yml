@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Dagster Orchestration Engine
+  # ---------------------------------------------------------------------------
+  dagster-pipeline:
+    build:
+      context: .
+      dockerfile: apps/pipeline/Dockerfile
+    container_name: portfolio-dagster-pipeline
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./apps/pipeline:/opt/dagster/app
+      - ./packages/portfolio-core:/opt/dagster/packages/portfolio-core
+      - dagster_storage:/opt/dagster/dagster_home
+    ports:
+      - "3000:3000"
+    command: ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "apps/pipeline/repo.py"]
+
+  # ---------------------------------------------------------------------------
+  # 2. Streamlit Risk & Volatility Analytics Dashboard
+  # ---------------------------------------------------------------------------
+  risk-dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: portfolio-risk-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./apps/dashboard:/app
+      - ./packages/portfolio-core:/packages/portfolio-core
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+volumes:
+  dagster_storage:

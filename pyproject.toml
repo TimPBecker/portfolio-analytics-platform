@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfolio-analytics-platform"
+version = "0.1.0"
+description = "Monorepo for Portfolio Risk Analytics, Dagster Orchestration, and Streamlit Dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/portfolio-core/tests",
+    "apps/pipeline/tests",
+    "apps/dashboard/tests"
+]
+python_files = ["test_*.py"]

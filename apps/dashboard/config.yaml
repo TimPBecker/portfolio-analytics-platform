@@ -1,0 +1,35 @@
+# =====================================================================
+# Portfolio Risk Dashboard Configuration (config.yaml)
+# =====================================================================
+
+# 1. Database Connection Configuration
+db:
+  # Database backend type: 'mariadb' (or 'mysql') | 'sqlite'
+  type: "mariadb"
+
+  # --- MariaDB / MySQL Configuration (Default) ---
+  host: "192.168.178.40"
+  port: 3306
+  user: "stocks"
+  database: "stocks"
+  # DB_PASSWORD is read securely from the .env environment variable
+
+  # --- SQLite Configuration (Alternative) ---
+  # To use SQLite, set type: "sqlite" and configure sqlite_path:
+  # type: "sqlite"
+  # sqlite_path: "stocks.s3db"
+
+# 2. Risk & Analytics Defaults
+analytics:
+  default_horizon: "1 Year"          # Default time horizon: '1 Month', '3 Months', '6 Months', '1 Year', '2 Years', 'All'
+  default_lookback_days: 260         # Lookback trading days for VaR simulation
+  default_confidence_level: 0.95     # Default VaR confidence level (95%)
+  ewma_decay_factor: 0.94            # RiskMetrics EWMA lambda parameter
+  annualization_factor: 252          # Trading days per year
+
+# 3. Streamlit UI Settings
+ui:
+  app_title: "Portfolio Risk & Volatility Analytics"
+  app_icon: "📈"
+  layout: "wide"
+  initial_sidebar_state: "collapsed"
