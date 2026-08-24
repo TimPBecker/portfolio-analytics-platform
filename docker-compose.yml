@@ -16,7 +16,6 @@ services:
       - dagster_storage:/opt/dagster/dagster_home
     ports:
       - "3000:3000"
-    command: ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "repo.py"]
 
   # ---------------------------------------------------------------------------
   # 2. Streamlit Risk & Volatility Analytics Dashboard
@@ -34,7 +33,6 @@ services:
       - ./packages/portfolio-core:/packages/portfolio-core
     ports:
       - "8501:8501"
-    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
 volumes:
   dagster_storage:

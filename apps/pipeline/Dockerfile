@@ -25,4 +25,4 @@ RUN mkdir -p $DAGSTER_HOME
 
 EXPOSE 3000
 
-ENTRYPOINT ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "repo.py"]
+CMD ["dagster", "dev", "-h", "0.0.0.0", "-p", "3000", "-f", "repo.py"]
