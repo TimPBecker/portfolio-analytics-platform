@@ -1281,34 +1281,28 @@ def calculate_and_store_daily_portfolio_values(backfill_days: int = 0, engine=No
             conn.execute(text(upsert_query), records_to_store)
             conn.commit()
         
-    latest = daily_portfolio.iloc[-1]
-    return {
-        "records_stored": len(records_to_store),
-        "total_historical_records": len(all_records),
-        "latest_date": str(latest["DATE"]),
-        "latest_total_value": float(latest["TOTAL_VALUE"]),
-        "latest_stocks_value": float(latest["STOCKS"]),
-        "latest_cash_value": float(latest["CASH"]),
-        "currency": str(latest["CURRENCY"]),
-        "summary_df": daily_portfolio
-    }
-    
-    if records_to_store:
-        with engine.connect() as conn:
-            conn.execute(text(upsert_query), records_to_store)
-            conn.commit()
-        
-    latest = daily_portfolio.iloc[-1]
-    return {
-        "records_stored": len(records_to_store),
-        "total_historical_records": len(all_records),
-        "latest_date": str(latest["DATE"]),
-        "latest_total_value": float(latest["TOTAL_VALUE"]),
-        "latest_stocks_value": float(latest["STOCKS"]),
-        "latest_cash_value": float(latest["CASH"]),
-        "currency": str(latest["CURRENCY"]),
-        "summary_df": daily_portfolio
-    }
+        latest = daily_portfolio.iloc[-1]
+        return {
+            "records_stored": len(records_to_store),
+            "total_historical_records": len(all_records),
+            "latest_date": str(latest["DATE"]),
+            "latest_total_value": float(latest["TOTAL_VALUE"]),
+            "latest_stocks_value": float(latest["STOCKS"]),
+            "latest_cash_value": float(latest["CASH"]),
+            "currency": str(latest["CURRENCY"]),
+            "summary_df": daily_portfolio
+        }
+    else:
+        return {
+            "records_stored": 0,
+            "total_historical_records": 0,
+            "latest_date": None,
+            "latest_total_value": 0.0,
+            "latest_stocks_value": 0.0,
+            "latest_cash_value": 0.0,
+            "currency": "GBP",
+            "summary_df": pd.DataFrame()
+        }
 
 
 def fetch_historical_prices_gbp(asof_date=None, engine=None) -> pd.DataFrame:
