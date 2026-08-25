@@ -30,7 +30,8 @@ from portfolio_core.analytics.statistics import (
     compute_asset_returns,
     compute_distribution_metrics,
     generate_density_curves,
-    compute_qq_plot_data
+    compute_qq_plot_data,
+    compute_top_position_movers
 )
 
 __all__ = [
@@ -53,5 +54,6 @@ __all__ = [
     "compute_asset_returns",
     "compute_distribution_metrics",
     "generate_density_curves",
-    "compute_qq_plot_data"
+    "compute_qq_plot_data",
+    "compute_top_position_movers"
 ]

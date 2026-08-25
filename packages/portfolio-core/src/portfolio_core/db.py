@@ -1305,6 +1305,10 @@ def calculate_and_store_daily_portfolio_values(backfill_days: int = 0, engine=No
         }
 
 
+# Alias for backward and forward compatibility
+compute_portfolio_values = calculate_and_store_daily_portfolio_values
+
+
 def fetch_historical_prices_gbp(asof_date=None, engine=None) -> pd.DataFrame:
     """
     Retrieves all historical asset prices from ASSET_PRICES, joins with daily FX rates
@@ -2033,3 +2037,234 @@ def fetch_stored_scenario_pnl(
     if not df.empty:
         df["DATE"] = pd.to_datetime(df["DATE"])
     return df
+
+
+def get_next_transaction_id(engine: Optional[Engine] = None) -> int:
+    """
+    Returns the next available auto-incremented ID for the TRANSACTIONS table.
+    Queries MAX(ID) and returns max_id + 1 (or 1 if table is empty).
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+    with eng.connect() as conn:
+        max_id = conn.execute(text("SELECT MAX(`ID`) FROM `TRANSACTIONS`")).scalar()
+        return (int(max_id) if max_id is not None else 0) + 1
+
+
+def record_transaction(
+    ticker: str,
+    transaction_date: Union[str, date],
+    quantity: float,
+    transaction_id: Optional[int] = None,
+    engine: Optional[Engine] = None
+) -> Dict[str, Any]:
+    """
+    Inserts a new trade transaction into the TRANSACTIONS table.
+    Assigns transaction_id automatically from get_next_transaction_id if omitted.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    clean_ticker = str(ticker).strip().upper()
+    if not clean_ticker:
+        raise ValueError("Ticker symbol cannot be empty.")
+
+    date_str = str(transaction_date)[:10]
+    qty = float(quantity)
+
+    if transaction_id is None:
+        tx_id = get_next_transaction_id(engine=eng)
+    else:
+        tx_id = int(transaction_id)
+
+    with eng.connect() as conn:
+        conn.execute(
+            text("INSERT INTO `TRANSACTIONS` (`ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY`) VALUES (:id, :ticker, :dt, :qty)"),
+            {"id": tx_id, "ticker": clean_ticker, "dt": date_str, "qty": qty}
+        )
+        conn.commit()
+
+    return {
+        "id": tx_id,
+        "ticker": clean_ticker,
+        "transaction_date": date_str,
+        "quantity": qty,
+        "status": "success"
+    }
+
+
+def fetch_all_transactions(limit: Optional[int] = None, engine: Optional[Engine] = None) -> pd.DataFrame:
+    """
+    Fetches historical records from TRANSACTIONS table ordered by ID DESC.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    with eng.connect() as conn:
+        df = pd.read_sql(
+            text(f"SELECT `ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY` FROM `TRANSACTIONS` ORDER BY `ID` DESC {limit_clause}"),
+            conn
+        )
+    return df
+
+
+def fetch_fx_rate_to_gbp(
+    from_currency: str,
+    target_date: Union[str, date],
+    engine: Optional[Engine] = None
+) -> Tuple[float, str]:
+    """
+    Determines the foreign exchange rate to convert from_currency to GBP on target_date.
+    Returns (rate, description_string).
+    - GBP -> 1.0
+    - GBp/GBX/GBp_PENCE -> 0.01 (pence to pounds)
+    - Foreign currencies (USD, EUR, etc.) -> checks FX_RATES database table, falling back to Yahoo Finance FX ticker.
+    """
+    fc_raw = str(from_currency).strip()
+    if fc_raw in ("GBp", "GBX", "GBp_PENCE") or fc_raw.lower() in ("gbp_pence", "pence"):
+        return 0.01, "GBp/GBP (0.01 pence to £)"
+
+    fc_clean = fc_raw.upper()
+    if fc_clean == "GBP":
+        return 1.0, "GBP/GBP (1.00)"
+
+    target_dt_str = str(target_date)[:10]
+
+    # 1. Check local database FX_RATES table
+    try:
+        eng = engine or get_engine()
+        with eng.connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT `RATE`, `DATE` FROM `FX_RATES`
+                    WHERE UPPER(`FROM_CURRENCY`) = :fc AND UPPER(`TO_CURRENCY`) = 'GBP' AND `DATE` <= :dt
+                    ORDER BY `DATE` DESC LIMIT 1
+                """),
+                {"fc": fc_clean, "dt": target_dt_str}
+            ).fetchone()
+            if row and row[0] is not None and float(row[0]) > 0:
+                return float(row[0]), f"{fc_clean}/GBP from database ({row[1]})"
+    except Exception:
+        pass
+
+    # 2. Query Yahoo Finance for live/historical FX pair
+    pair_ticker = f"{fc_clean}GBP=X"
+    try:
+        stock = yf.Ticker(pair_ticker)
+        dt = pd.to_datetime(target_date)
+        start_dt = (dt - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+        end_dt = (dt + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        hist = stock.history(start=start_dt, end=end_dt)
+        if hist.empty:
+            hist = stock.history(period="1mo")
+        if not hist.empty:
+            hist = hist.reset_index()
+            hist_date_col = "Date" if "Date" in hist.columns else hist.columns[0]
+            hist["Date_str"] = pd.to_datetime(hist[hist_date_col]).dt.strftime("%Y-%m-%d")
+            valid = hist[hist["Date_str"] <= target_dt_str]
+            selected = valid.iloc[-1] if not valid.empty else hist.iloc[-1]
+            close_col = "Close" if "Close" in selected else "CLOSE"
+            rate_val = float(selected[close_col])
+            if rate_val > 0:
+                return rate_val, f"{fc_clean}/GBP from Yahoo Finance ({selected['Date_str']})"
+    except Exception:
+        pass
+
+    # 3. Fallback inverse pair (e.g. GBPUSD=X)
+    try:
+        inv_ticker = f"GBP{fc_clean}=X"
+        stock = yf.Ticker(inv_ticker)
+        hist = stock.history(period="5d")
+        if not hist.empty:
+            close_col = "Close" if "Close" in hist.columns else "CLOSE"
+            inv_rate = float(hist[close_col].iloc[-1])
+            if inv_rate > 0:
+                rate_val = 1.0 / inv_rate
+                return rate_val, f"{fc_clean}/GBP inverse from Yahoo Finance (1 / {inv_rate:,.4f})"
+    except Exception:
+        pass
+
+    return 1.0, f"Fallback rate (1.00 for {fc_clean})"
+
+
+def query_yahoo_close_price(
+    ticker: str,
+    target_date: Union[str, date],
+    engine: Optional[Engine] = None
+) -> Dict[str, Any]:
+    """
+    Queries Yahoo Finance for the historical closing price of a given ticker on or immediately
+    preceding target_date (handling weekends and market holidays), and translates the price to GBP.
+    """
+    clean_ticker = str(ticker).strip().upper()
+    if not clean_ticker:
+        return {"status": "error", "message": "No ticker provided"}
+
+    dt = pd.to_datetime(target_date)
+    start_dt = (dt - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    end_dt = (dt + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+
+    stock = yf.Ticker(clean_ticker)
+    hist = pd.DataFrame()
+    for _ in range(2):
+        try:
+            hist = stock.history(start=start_dt, end=end_dt)
+            if not hist.empty:
+                break
+        except Exception:
+            time.sleep(0.5)
+
+    if hist.empty:
+        try:
+            hist = stock.history(period="1mo")
+        except Exception:
+            pass
+
+    if hist.empty:
+        return {
+            "status": "error",
+            "message": f"Could not retrieve price data from Yahoo Finance for '{clean_ticker}'."
+        }
+
+    hist = hist.reset_index()
+    hist_date_col = "Date" if "Date" in hist.columns else ("DATE" if "DATE" in hist.columns else hist.columns[0])
+    hist["Date_str"] = pd.to_datetime(hist[hist_date_col]).dt.strftime("%Y-%m-%d")
+
+    target_date_str = str(target_date)[:10]
+    valid_rows = hist[hist["Date_str"] <= target_date_str]
+    if not valid_rows.empty:
+        selected_row = valid_rows.iloc[-1]
+    else:
+        selected_row = hist.iloc[0]
+
+    close_col = "Close" if "Close" in hist.columns else "CLOSE"
+    close_price = float(selected_row[close_col])
+    found_date = str(selected_row["Date_str"])
+
+    currency = None
+    try:
+        if hasattr(stock, "history_metadata") and stock.history_metadata:
+            currency = stock.history_metadata.get("currency")
+        elif hasattr(stock, "fast_info"):
+            currency = getattr(stock.fast_info, "currency", None)
+        elif hasattr(stock, "info"):
+            currency = stock.info.get("currency")
+    except Exception:
+        pass
+    currency = currency or "USD"
+
+    fx_rate, fx_desc = fetch_fx_rate_to_gbp(from_currency=currency, target_date=found_date, engine=engine)
+    close_price_gbp = close_price * fx_rate
+
+    return {
+        "ticker": clean_ticker,
+        "target_date": target_date_str,
+        "found_date": found_date,
+        "close_price": close_price,
+        "currency": currency,
+        "is_exact_date": (found_date == target_date_str),
+        "fx_rate_to_gbp": fx_rate,
+        "fx_description": fx_desc,
+        "close_price_gbp": close_price_gbp,
+        "status": "success"
+    }

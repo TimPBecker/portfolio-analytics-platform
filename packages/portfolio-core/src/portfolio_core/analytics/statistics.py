@@ -161,3 +161,107 @@ def compute_qq_plot_data(returns: pd.Series) -> Tuple[np.ndarray, np.ndarray, fl
 
     (osm, osr), (slope, intercept, r) = stats.probplot(clean_rets, dist="norm")
     return np.asarray(osm), np.asarray(osr), float(slope), float(intercept)
+
+
+def compute_top_position_movers(
+    prices_gbp: pd.DataFrame,
+    positions: Dict[str, float],
+    prev_positions: Optional[Dict[str, float]] = None,
+    asof_date: Optional[str] = None,
+    top_n: int = 10
+) -> pd.DataFrame:
+    """
+    Computes the day-over-day change in position market value (in GBP) for all held assets
+    between the reporting date (or latest date in price history) and the preceding available market date.
+    Returns the top `top_n` positions ranked in descending order of absolute value difference (|ΔValue|).
+
+    Parameters:
+    -----------
+    prices_gbp : pd.DataFrame
+        Historical price matrix (Date index x Ticker columns) in GBP.
+    positions : Dict[str, float]
+        Dictionary of {ticker: shares} as of the target date.
+    prev_positions : Optional[Dict[str, float]]
+        Dictionary of {ticker: shares} as of the previous date (defaults to `positions` if None).
+    asof_date : Optional[str]
+        Target valuation date (YYYY-MM-DD). If provided, prices_gbp is sliced up to this date.
+    top_n : int
+        Number of top movers to return (default: 10).
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with columns:
+        ['TICKER', 'SHARES', 'PRICE_TODAY_GBP', 'PRICE_PREV_GBP', 'PRICE_CHG_PCT',
+         'VALUE_TODAY_GBP', 'VALUE_PREV_GBP', 'DIFF_GBP', 'DIFF_PCT', 'ABS_DIFF_GBP']
+        sorted by ABS_DIFF_GBP in descending order.
+    """
+    if prices_gbp is None or prices_gbp.empty or len(prices_gbp) < 2 or not positions:
+        return pd.DataFrame(columns=[
+            "TICKER", "SHARES", "PRICE_TODAY_GBP", "PRICE_PREV_GBP", "PRICE_CHG_PCT",
+            "VALUE_TODAY_GBP", "VALUE_PREV_GBP", "DIFF_GBP", "DIFF_PCT", "ABS_DIFF_GBP"
+        ])
+
+    prices = prices_gbp.copy()
+    if asof_date:
+        asof_ts = pd.to_datetime(asof_date)
+        if isinstance(prices.index, pd.DatetimeIndex):
+            prices = prices.loc[prices.index <= asof_ts]
+        else:
+            asof_str = str(asof_date)[:10]
+            prices = prices.loc[[str(idx)[:10] <= asof_str for idx in prices.index]]
+
+    if len(prices) < 2:
+        return pd.DataFrame(columns=[
+            "TICKER", "SHARES", "PRICE_TODAY_GBP", "PRICE_PREV_GBP", "PRICE_CHG_PCT",
+            "VALUE_TODAY_GBP", "VALUE_PREV_GBP", "DIFF_GBP", "DIFF_PCT", "ABS_DIFF_GBP"
+        ])
+
+    today_prices = prices.iloc[-1]
+    prev_prices = prices.iloc[-2]
+
+    pos_today = positions or {}
+    pos_prev = prev_positions if prev_positions is not None else pos_today
+
+    all_tickers = sorted(list(set(pos_today.keys()) | set(pos_prev.keys())))
+    rows = []
+
+    for ticker in all_tickers:
+        sh_today = float(pos_today.get(ticker, 0.0))
+        sh_prev = float(pos_prev.get(ticker, 0.0))
+
+        if sh_today == 0.0 and sh_prev == 0.0:
+            continue
+
+        p_today = float(today_prices.get(ticker, 0.0)) if ticker in today_prices and pd.notna(today_prices[ticker]) else 0.0
+        p_prev = float(prev_prices.get(ticker, 0.0)) if ticker in prev_prices and pd.notna(prev_prices[ticker]) else 0.0
+
+        val_today = sh_today * p_today
+        val_prev = sh_prev * p_prev
+        diff_gbp = val_today - val_prev
+        abs_diff = abs(diff_gbp)
+        diff_pct = ((val_today / val_prev) - 1.0) * 100.0 if val_prev > 0 else (100.0 if val_today > 0 else 0.0)
+        price_chg_pct = ((p_today / p_prev) - 1.0) * 100.0 if p_prev > 0 else (100.0 if p_today > 0 else 0.0)
+
+        rows.append({
+            "TICKER": ticker,
+            "SHARES": sh_today,
+            "PRICE_TODAY_GBP": p_today,
+            "PRICE_PREV_GBP": p_prev,
+            "PRICE_CHG_PCT": price_chg_pct,
+            "VALUE_TODAY_GBP": val_today,
+            "VALUE_PREV_GBP": val_prev,
+            "DIFF_GBP": diff_gbp,
+            "DIFF_PCT": diff_pct,
+            "ABS_DIFF_GBP": abs_diff,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            "TICKER", "SHARES", "PRICE_TODAY_GBP", "PRICE_PREV_GBP", "PRICE_CHG_PCT",
+            "VALUE_TODAY_GBP", "VALUE_PREV_GBP", "DIFF_GBP", "DIFF_PCT", "ABS_DIFF_GBP"
+        ])
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("ABS_DIFF_GBP", ascending=False).head(max(1, top_n)).reset_index(drop=True)
+    return df

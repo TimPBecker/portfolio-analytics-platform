@@ -8,7 +8,8 @@ from portfolio_core.analytics.statistics import (
     compute_asset_returns,
     compute_distribution_metrics,
     generate_density_curves,
-    compute_qq_plot_data
+    compute_qq_plot_data,
+    compute_top_position_movers
 )
 
 
@@ -55,3 +56,32 @@ def test_compute_qq_plot_data():
     assert len(osm) == 100
     assert len(osr) == 100
     assert slope > 0
+
+
+def test_compute_top_position_movers():
+    dates = pd.date_range("2026-08-01", periods=3, freq="B")
+    prices_df = pd.DataFrame({
+        "NVDA": [100.0, 100.0, 110.0],
+        "STAN.L": [20.0, 20.0, 18.0],
+        "AAPL": [50.0, 50.0, 51.0]
+    }, index=dates)
+    positions = {"NVDA": 100.0, "STAN.L": 500.0, "AAPL": 200.0}
+
+    movers = compute_top_position_movers(prices_df, positions, top_n=2)
+    assert len(movers) == 2
+    # STAN.L: 500 * (18 - 20) = -1000 GBP (|Δ| = 1000)
+    # NVDA: 100 * (110 - 100) = +1000 GBP (|Δ| = 1000)
+    # AAPL: 200 * (51 - 50) = +200 GBP (|Δ| = 200)
+    assert movers["ABS_DIFF_GBP"].iloc[0] == 1000.0
+    assert movers["ABS_DIFF_GBP"].iloc[1] == 1000.0
+    assert "DIFF_GBP" in movers.columns
+    assert "DIFF_PCT" in movers.columns
+    assert "PRICE_TODAY_GBP" in movers.columns
+    assert "PRICE_PREV_GBP" in movers.columns
+
+
+def test_compute_top_position_movers_empty():
+    empty_df = pd.DataFrame()
+    movers = compute_top_position_movers(empty_df, {"NVDA": 10.0})
+    assert movers.empty
+    assert "TICKER" in movers.columns
