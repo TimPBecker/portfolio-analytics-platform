@@ -15,8 +15,10 @@ from portfolio_core.analytics.statistics import compute_top_position_movers
 
 try:
     from src.ui.theme import PALETTE, get_plotly_layout_defaults
+    from src.services.report_generator import generate_portfolio_pdf_report
 except ImportError:
     from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
+    from apps.dashboard.src.services.report_generator import generate_portfolio_pdf_report
 
 
 def render_tab_portfolio(
@@ -24,9 +26,31 @@ def render_tab_portfolio(
     positions: Dict[str, float],
     asof_date: Optional[str] = None
 ):
-    """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view."""
-    st.markdown("### 💼 Portfolio Holdings & Historical Valuation")
-    st.caption("Overview of stock holdings valuation, top daily movers, weight allocation breakdown, and historical trajectory.")
+    """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view with PDF Export."""
+    def _create_report_bytes() -> bytes:
+        ok, path, pdf_bytes, err = generate_portfolio_pdf_report(asof_date=asof_date)
+        if ok and pdf_bytes:
+            return pdf_bytes
+        st.error(f"Failed to generate PDF report: {err}")
+        return b""
+
+    report_date_str = str(asof_date or 'latest')[:10]
+    col_header, col_pdf_action = st.columns([2.6, 1.4])
+    with col_header:
+        st.markdown("### 💼 Portfolio Holdings & Historical Valuation")
+        st.caption("Overview of stock holdings valuation, top daily movers, weight allocation breakdown, and historical trajectory.")
+    with col_pdf_action:
+        st.markdown("<div style='padding-top: 6px;'>", unsafe_allow_html=True)
+        st.download_button(
+            label="📄 Export PDF Report",
+            data=_create_report_bytes,
+            file_name=f"Portfolio_Analytics_Report_{report_date_str}.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+            help="Click to generate and download the executive PDF report in a single step."
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if prices_gbp.empty or not positions:
         st.warning("Insufficient price data or active positions.")

@@ -1,11 +1,20 @@
 FROM python:3.12-slim
 
-# Install system dependencies for cryptography, build tools, curl
+# Install system dependencies for cryptography, build tools, curl, fonts, wget
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    wget \
     git \
+    libfontconfig1 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Quarto CLI (includes Typst compiler)
+ARG QUARTO_VERSION=1.6.42
+RUN wget -q https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-amd64.deb \
+    && dpkg -i quarto-${QUARTO_VERSION}-linux-amd64.deb \
+    && rm quarto-${QUARTO_VERSION}-linux-amd64.deb
 
 WORKDIR /app
 
@@ -17,7 +26,8 @@ RUN pip install --no-cache-dir -e /packages/portfolio-core
 COPY apps/dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy dashboard application source code
+# Copy reports templates & dashboard application source code
+COPY reports /reports
 COPY apps/dashboard /app
 
 # Expose Streamlit default port

@@ -1,0 +1,591 @@
+---
+title: "Executive Portfolio & Risk Analytics Report"
+subtitle: "Visual Quantitative Portfolio Health, Risk Spectrum & Benchmark Analysis"
+author: "Portfolio Analytics Platform"
+date: today
+date-format: "YYYY-MM-DD"
+format:
+  typst:
+    toc: true
+    toc-title: "Table of Contents"
+    toc-depth: 2
+    section-numbering: "1.1"
+    papersize: a4
+    margin:
+      x: 1.6cm
+      y: 1.8cm
+    mainfont: "Liberation Sans"
+    fontsize: 9.5pt
+---
+
+```{python}
+#| echo: false
+#| warning: false
+#| message: false
+
+import os
+import datetime
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.dates as mdates
+
+# Set publication style defaults
+plt.rcParams['font.sans-serif'] = 'Liberation Sans'
+plt.rcParams['axes.edgecolor'] = '#CBD5E1'
+plt.rcParams['axes.linewidth'] = 0.8
+plt.rcParams['grid.color'] = '#E2E8F0'
+plt.rcParams['grid.linestyle'] = '--'
+plt.rcParams['grid.alpha'] = 0.7
+
+from portfolio_core.db import (
+    get_engine,
+    fetch_portfolio_positions,
+    fetch_historical_prices_gbp,
+    fetch_portfolio_values_history,
+    fetch_benchmark_values_history,
+    fetch_benchmarks_info,
+    fetch_stored_var_metrics,
+    fetch_stored_risk_contributions,
+    fetch_stored_scenario_pnl,
+)
+from portfolio_core.analytics.statistics import (
+    compute_top_position_movers,
+    compute_asset_returns,
+    compute_distribution_metrics,
+)
+from portfolio_core.analytics.volatility import (
+    calculate_ewma_volatility,
+    calculate_sample_volatility
+)
+
+# Configuration & Data Retrieval
+engine = get_engine()
+asof_env = os.environ.get("REPORT_ASOF_DATE", None)
+if asof_env and asof_env.strip():
+    asof_date = asof_env.strip()[:10]
+else:
+    asof_date = None
+
+positions = fetch_portfolio_positions(asof=asof_date, engine=engine)
+prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=engine)
+pv_df = fetch_portfolio_values_history(asof_date=asof_date, engine=engine)
+bm_values_df = fetch_benchmark_values_history(asof_date=asof_date, engine=engine)
+bm_info_df = fetch_benchmarks_info(engine=engine)
+var_df = fetch_stored_var_metrics(asof_date=asof_date, engine=engine)
+rc_df = fetch_stored_risk_contributions(asof_date=asof_date, engine=engine)
+sc_df = fetch_stored_scenario_pnl(asof_date=asof_date, engine=engine)
+
+# Resolve latest dates and figures
+if not pv_df.empty:
+    latest_pv = pv_df.iloc[-1]
+    report_date_str = pd.to_datetime(latest_pv["DATE"]).strftime("%d %B %Y")
+    inception_date_str = pd.to_datetime(pv_df.iloc[0]["DATE"]).strftime("%d %B %Y")
+    total_val = float(latest_pv["TOTAL_VALUE"])
+    stocks_val = float(latest_pv["STOCKS"])
+    cash_val = float(latest_pv["CASH"])
+    
+    if len(pv_df) >= 2:
+        prev_pv = pv_df.iloc[-2]
+        day_diff = total_val - float(prev_pv["TOTAL_VALUE"])
+        day_diff_pct = ((total_val / float(prev_pv["TOTAL_VALUE"])) - 1.0) * 100.0
+    else:
+        day_diff = 0.0
+        day_diff_pct = 0.0
+        
+    inception_val = float(pv_df.iloc[0]["TOTAL_VALUE"])
+    total_return_pct = ((total_val / inception_val) - 1.0) * 100.0 if inception_val > 0 else 0.0
+else:
+    report_date_str = "N/A"
+    inception_date_str = "N/A"
+    total_val = 0.0
+    stocks_val = 0.0
+    cash_val = 0.0
+    day_diff = 0.0
+    day_diff_pct = 0.0
+    total_return_pct = 0.0
+```
+
+# Executive Valuation & Portfolio Trajectory
+
+Executive summary of overall portfolio valuation, stock equity holdings, and accumulated dividend cash buffer as of **`{python} report_date_str`**.
+
+```{python}
+#| echo: false
+#| warning: false
+
+summary_data = [
+    ["Valuation As-Of Date", report_date_str],
+    ["Portfolio Inception Date", inception_date_str],
+    ["Total Portfolio Valuation", f"£{total_val:,.2f} GBP"],
+    ["Stock Holdings Valuation", f"£{stocks_val:,.2f} GBP ({ (stocks_val/total_val*100) if total_val else 0:.1f}%)"],
+    ["Dividend Cash Buffer", f"£{cash_val:,.2f} GBP ({ (cash_val/total_val*100) if total_val else 0:.1f}%)"],
+    ["Active Stock Holdings", f"{len(positions)} positions"],
+    ["Day-over-Day Value Change", f"{'+' if day_diff > 0 else ''}£{day_diff:,.2f} ({'+' if day_diff_pct > 0 else ''}{day_diff_pct:.2f}%)"],
+    ["Total Return Since Inception", f"{'+' if total_return_pct > 0 else ''}{total_return_pct:.2f}%"]
+]
+
+summary_df = pd.DataFrame(summary_data, columns=["Key Metric", "Value"])
+print(summary_df.to_markdown(index=False))
+```
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.6
+
+if not pv_df.empty:
+    plot_df = pv_df.copy()
+    plot_df["DATE"] = pd.to_datetime(plot_df["DATE"])
+    plot_df = plot_df.sort_values("DATE")
+
+    fig, ax = plt.subplots(figsize=(7.6, 3.6), dpi=300)
+    
+    # Fill cash buffer
+    ax.fill_between(plot_df["DATE"], plot_df["STOCKS"], plot_df["TOTAL_VALUE"], color='#10B981', alpha=0.25, label=f'Dividend Cash Buffer (£{cash_val:,.2f})')
+    # Stock holdings
+    ax.fill_between(plot_df["DATE"], 0, plot_df["STOCKS"], color='#3B82F6', alpha=0.15, label=f'Stock Holdings (£{stocks_val:,.2f})')
+    
+    ax.plot(plot_df["DATE"], plot_df["TOTAL_VALUE"], color='#1E3A8A', lw=2.4, label='Total Portfolio Value')
+    ax.plot(plot_df["DATE"], plot_df["STOCKS"], color='#2563EB', lw=1.6, linestyle='--', label='Stock Equity Value')
+    
+    ax.set_title("Historical Portfolio Valuation & Capital Growth (GBP)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.set_ylabel("Valuation (£ GBP)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('£{x:,.0f}'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8, loc='upper left')
+    
+    # Add end value annotation
+    last_date = plot_df["DATE"].iloc[-1]
+    ax.annotate(f"£{total_val:,.0f}", xy=(last_date, total_val), xytext=(10, 0),
+                textcoords="offset points", va="center", fontsize=8.5, fontweight="bold", color="#1E3A8A")
+    
+    plt.tight_layout()
+    plt.show()
+```
+
+# Stock Holdings & Asset Allocation
+
+Visual weight breakdown and valuation across all active constituent equity holdings.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.8
+
+if not prices_gbp.empty and positions:
+    latest_px = prices_gbp.iloc[-1]
+    chart_items = []
+    for t_sym, sh in positions.items():
+        if sh > 0 and t_sym in latest_px:
+            v = sh * float(latest_px[t_sym])
+            chart_items.append((t_sym, sh, float(latest_px[t_sym]), v))
+    
+    chart_items.sort(key=lambda x: x[3], reverse=False)
+    t_labels = [x[0] for x in chart_items]
+    t_vals = [x[3] for x in chart_items]
+    t_shares = [x[1] for x in chart_items]
+    t_prices = [x[2] for x in chart_items]
+    tot = sum(t_vals)
+    t_pcts = [(v / tot * 100.0) if tot > 0 else 0.0 for v in t_vals]
+
+    fig, ax = plt.subplots(figsize=(7.6, 3.8), dpi=300)
+    colors = plt.cm.Blues(np.linspace(0.45, 0.9, len(t_labels)))
+    bars = ax.barh(t_labels, t_pcts, color=colors, edgecolor='#1E3A8A', height=0.62)
+    
+    ax.set_xlabel("Portfolio Weight (%)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.set_title("Equity Holdings Allocation & Weight Breakdown (%)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=100))
+    ax.grid(axis='x', linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    for idx, bar in enumerate(bars):
+        w = bar.get_width()
+        val_str = f"£{t_vals[idx]:,.0f} ({w:.1f}%)"
+        ax.text(w + 0.3, bar.get_y() + bar.get_height()/2, val_str, va='center', ha='left', fontsize=8, color='#0F172A', fontweight='bold')
+
+    ax.set_xlim(0, max(t_pcts) * 1.25)
+    plt.tight_layout()
+    plt.show()
+```
+
+# Top Position Daily Movers
+
+Day-over-day monetary value change and price impact for the top constituent holdings.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.6
+
+movers_df = compute_top_position_movers(
+    prices_gbp=prices_gbp,
+    positions=positions,
+    asof_date=asof_date,
+    top_n=10
+)
+
+if not movers_df.empty:
+    m_df = movers_df.iloc[::-1]
+    fig, ax = plt.subplots(figsize=(7.6, 3.6), dpi=300)
+    bar_cols = ['#10B981' if v >= 0 else '#DC2626' for v in m_df["DIFF_GBP"]]
+    bars = ax.barh(m_df["TICKER"], m_df["DIFF_GBP"], color=bar_cols, edgecolor='#334155', height=0.6)
+    
+    ax.axvline(0, color='#64748B', linewidth=0.9, linestyle='--')
+    ax.set_xlabel("Daily Monetary Impact (£ GBP)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.set_title("Top Position Daily Movers: Absolute Monetary P&L Impact (£)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('£{x:,.0f}'))
+    ax.grid(axis='x', linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    for idx, bar in enumerate(bars):
+        w = bar.get_width()
+        pct = m_df["DIFF_PCT"].iloc[idx]
+        txt = f"{'+' if w >= 0 else ''}£{w:,.1f} ({'+' if pct >= 0 else ''}{pct:.1f}%)"
+        if w >= 0:
+            ax.text(w + (max(abs(m_df["DIFF_GBP"]))*0.02), bar.get_y() + bar.get_height()/2, txt, va='center', ha='left', fontsize=7.8, color='#065F46', fontweight='bold')
+        else:
+            ax.text(w - (max(abs(m_df["DIFF_GBP"]))*0.02), bar.get_y() + bar.get_height()/2, txt, va='center', ha='right', fontsize=7.8, color='#991B1B', fontweight='bold')
+
+    max_lim = max(abs(m_df["DIFF_GBP"])) * 1.35
+    ax.set_xlim(-max_lim, max_lim)
+    plt.tight_layout()
+    plt.show()
+```
+
+# Benchmarking & Comparative Performance
+
+Visual comparison of portfolio growth against standard benchmark indices and custom multi-asset blends. Benchmarks reflect exact GBP trade matching and accumulated constituent dividend accounts.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.8
+
+if not bm_values_df.empty and not pv_df.empty:
+    fig, ax = plt.subplots(figsize=(7.6, 3.8), dpi=300)
+    
+    # Actual portfolio rebased to 100
+    p_series = pv_df.sort_values("DATE").copy()
+    p_series["DATE"] = pd.to_datetime(p_series["DATE"])
+    min_date = p_series["DATE"].min()
+    p_base = float(p_series.iloc[0]["TOTAL_VALUE"])
+    ax.plot(p_series["DATE"], (p_series["TOTAL_VALUE"] / p_base) * 100.0, color='#1E3A8A', lw=2.6, label='Actual Portfolio (Stocks + Cash)')
+    
+    b_colors = ['#DC2626', '#16A34A', '#D97706', '#9333EA', '#0891B2', '#EA580C']
+    c_idx = 0
+    for b_code in bm_values_df["BENCHMARK_CODE"].unique():
+        sub = bm_values_df[(bm_values_df["BENCHMARK_CODE"] == b_code) & (bm_values_df["DATE"] >= min_date)].sort_values("DATE").copy()
+        if not sub.empty:
+            sub["DATE"] = pd.to_datetime(sub["DATE"])
+            b_first_pos = sub[sub["TOTAL_VALUE"] > 0]
+            if not b_first_pos.empty:
+                b_base = float(b_first_pos.iloc[0]["TOTAL_VALUE"])
+                b_name = b_code
+                if not bm_info_df.empty:
+                    m = bm_info_df[bm_info_df["BENCHMARK_CODE"] == b_code]
+                    if not m.empty:
+                        b_name = m.iloc[0]["NAME"]
+                
+                ax.plot(sub["DATE"], (sub["TOTAL_VALUE"] / b_base) * 100.0, color=b_colors[c_idx % len(b_colors)], lw=1.6, linestyle='--', label=f"{b_name}")
+                c_idx += 1
+            
+    ax.set_title("Normalized Cumulative Growth: Portfolio vs Benchmarks (Inception Base = 100)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.set_ylabel("Rebased Index (Base = 100)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=7.5, loc='upper left')
+    plt.tight_layout()
+    plt.show()
+```
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.4
+
+# Comparative Return Distribution Histogram
+if not bm_values_df.empty and not pv_df.empty:
+    fig, ax = plt.subplots(figsize=(7.6, 3.4), dpi=300)
+    
+    p_rets_raw = pv_df.sort_values("DATE")["TOTAL_VALUE"].astype(float).pct_change().dropna() * 100.0
+    p_rets = p_rets_raw[np.isfinite(p_rets_raw)]
+    
+    if not p_rets.empty:
+        ax.hist(p_rets, bins=35, density=True, color='#3B82F6', alpha=0.5, edgecolor='#1E3A8A', label=f'Portfolio Returns (μ={p_rets.mean():.2f}%, σ={p_rets.std():.2f}%)')
+    
+    # Pick primary benchmark (CSP1.L or first benchmark)
+    bm_first_code = bm_values_df["BENCHMARK_CODE"].unique()[0]
+    bm_sub = bm_values_df[bm_values_df["BENCHMARK_CODE"] == bm_first_code].sort_values("DATE")
+    bm_rets_raw = bm_sub["TOTAL_VALUE"].astype(float).pct_change().dropna() * 100.0
+    bm_rets = bm_rets_raw[np.isfinite(bm_rets_raw)]
+    
+    if not bm_rets.empty:
+        ax.hist(bm_rets, bins=35, density=True, color='#F87171', alpha=0.4, edgecolor='#DC2626', label=f'{bm_first_code} Benchmark (μ={bm_rets.mean():.2f}%, σ={bm_rets.std():.2f}%)')
+    
+    ax.set_title("Comparative Daily Return Distributions: Actual Portfolio vs Benchmark", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.set_xlabel("Daily Return (%)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.set_ylabel("Probability Density", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8)
+    plt.tight_layout()
+    plt.show()
+```
+
+# Rolling Volatility & Regime Dynamics
+
+Dynamic time-series comparison of RiskMetrics EWMA ($\lambda=0.94$) and rolling sample volatility estimators.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.6
+
+if not prices_gbp.empty and positions:
+    # Compute portfolio asset log returns and weighted volatility
+    log_rets = np.log(prices_gbp / prices_gbp.shift(1)).dropna()
+    ewma_vols = calculate_ewma_volatility(log_rets, decay_factor=0.94) * np.sqrt(252) * 100.0
+    roll_30 = calculate_sample_volatility(log_rets, window=30) * np.sqrt(252) * 100.0
+    roll_60 = calculate_sample_volatility(log_rets, window=60) * np.sqrt(252) * 100.0
+    
+    # Calculate portfolio weighted rolling volatility
+    latest_px = prices_gbp.iloc[-1]
+    active_weights = {}
+    tot_stk = sum(positions[t] * float(latest_px[t]) for t in positions if t in latest_px)
+    for t, sh in positions.items():
+        if t in latest_px and tot_stk > 0:
+            active_weights[t] = (sh * float(latest_px[t])) / tot_stk
+            
+    port_ewma = sum(ewma_vols[t] * w for t, w in active_weights.items() if t in ewma_vols).dropna()
+    port_roll30 = sum(roll_30[t] * w for t, w in active_weights.items() if t in roll_30).dropna()
+    port_roll60 = sum(roll_60[t] * w for t, w in active_weights.items() if t in roll_60).dropna()
+
+    fig, ax = plt.subplots(figsize=(7.6, 3.6), dpi=300)
+    ax.plot(port_ewma.index, port_ewma, color='#1E3A8A', lw=2.2, label='EWMA Volatility (λ=0.94)')
+    ax.plot(port_roll30.index, port_roll30, color='#D97706', lw=1.6, linestyle='--', label='Rolling Sample (30-day Window)')
+    ax.plot(port_roll60.index, port_roll60, color='#059669', lw=1.6, linestyle=':', label='Rolling Sample (60-day Window)')
+    
+    ax.set_title("Portfolio Annualized Rolling Volatility Trajectory (%)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.set_ylabel("Annualized Volatility (%)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8, loc='upper left')
+    plt.tight_layout()
+    plt.show()
+```
+
+# Value-at-Risk (VaR) & Tail Risk Spectrum
+
+1-Day quantitative risk evaluation across Historical Simulation and Volatility-Scaled models.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.6
+
+if not var_df.empty:
+    # Filter 1-Day Horizon only (exclude 10-day VaR)
+    v_1d = var_df[var_df["HORIZON_DAYS"] == 1].copy()
+    
+    if not v_1d.empty:
+        target_cls = [0.90, 0.95, 0.975, 0.99]
+        v_sub = v_1d[v_1d["CONFIDENCE_LEVEL"].isin(target_cls)].copy()
+        
+        methods = v_sub["METHOD"].unique()
+        cls = sorted(v_sub["CONFIDENCE_LEVEL"].unique())
+        
+        fig, ax = plt.subplots(figsize=(7.6, 3.6), dpi=300)
+        x_pos = np.arange(len(cls))
+        bar_w = 0.36
+        
+        m_colors = ['#3B82F6', '#10B981', '#D97706', '#8B5CF6']
+        
+        for m_idx, m_name in enumerate(methods):
+            m_data = v_sub[v_sub["METHOD"] == m_name]
+            vals = []
+            for cl in cls:
+                row = m_data[m_data["CONFIDENCE_LEVEL"] == cl]
+                vals.append(abs(float(row["VAR_GBP"].iloc[0])) if not row.empty else 0.0)
+            
+            clean_m = m_name.replace("Volatility-Scaled Historical Simulation", "Vol-Scaled").replace("Historical Simulation", "Historical")
+            offset = (m_idx - (len(methods) - 1) / 2) * bar_w
+            bars = ax.bar(x_pos + offset, vals, width=bar_w, label=f'{clean_m}', color=m_colors[m_idx % len(m_colors)], edgecolor='#1E293B', linewidth=0.7)
+            
+            for bar in bars:
+                h = bar.get_height()
+                if h > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2, h + 80, f'£{h:,.0f}', ha='center', va='bottom', fontsize=7.2, fontweight='bold', color='#1E293B')
+
+        ax.set_title("1-Day Horizon Value-at-Risk (£) by Model & Confidence Level", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+        ax.set_xlabel("Confidence Level (%)", fontsize=9, fontweight='bold', color='#1E293B')
+        ax.set_ylabel("1-Day VaR (£ GBP)", fontsize=9, fontweight='bold', color='#1E293B')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([f'{cl*100:.1f}%' for cl in cls], fontsize=8.5, fontweight='bold')
+        ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('£{x:,.0f}'))
+        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8, loc='upper left')
+        
+        plt.tight_layout()
+        plt.show()
+```
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.4
+
+# Scenario PnL Tail Risk Distribution Chart
+if not sc_df.empty and "HISTORICAL_PNL" in sc_df.columns:
+    fig, ax = plt.subplots(figsize=(7.6, 3.4), dpi=300)
+    
+    # Filter for standard historical simulation PnL
+    pnl_series = sc_df["HISTORICAL_PNL"].astype(float).dropna()
+    pnl_series = pnl_series[np.isfinite(pnl_series)]
+    n, bins, patches = ax.hist(pnl_series, bins=35, color='#60A5FA', edgecolor='#2563EB', alpha=0.7, label='Historical Simulation P&L (£)')
+    
+    var_95 = np.percentile(pnl_series, 5.0)
+    var_99 = np.percentile(pnl_series, 1.0)
+    
+    ax.axvline(var_95, color='#D97706', lw=2.0, linestyle='--', label=f'95% VaR Cutoff: £{abs(var_95):,.0f}')
+    ax.axvline(var_99, color='#DC2626', lw=2.0, linestyle='-', label=f'99% VaR Cutoff: £{abs(var_99):,.0f}')
+    
+    ax.set_title("Historical Simulation Scenario P&L Distribution with VaR Cutoffs", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.set_xlabel("Scenario Daily P&L (£ GBP)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.set_ylabel("Frequency Count", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('£{x:,.0f}'))
+    ax.grid(True, linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8)
+    plt.tight_layout()
+    plt.show()
+```
+
+# Shapley Additive Risk Attribution
+
+Decomposition of portfolio Value-at-Risk across constituent assets highlighting marginal risk contributions and diversification benefits.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 7.5
+
+if not rc_df.empty:
+    rc_latest = rc_df.copy()
+    if "CONFIDENCE_LEVEL" in rc_latest.columns:
+        max_cl = rc_latest["CONFIDENCE_LEVEL"].max()
+        rc_latest = rc_latest[rc_latest["CONFIDENCE_LEVEL"] == max_cl]
+    
+    rc_plot = rc_latest.sort_values(by="SHAPLEY_VAR_GBP", ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(7.6, 7.5), dpi=300)
+    t_names = rc_plot["TICKER"].tolist()
+    shapley_vals = [abs(float(v)) for v in rc_plot["SHAPLEY_VAR_GBP"]]
+    standalone_vals = [abs(float(v)) for v in rc_plot.get("STANDALONE_VAR_GBP", shapley_vals)]
+    
+    y_pos = np.arange(len(t_names))
+    h_bar = 0.36
+    
+    ax.barh(y_pos - h_bar/2, standalone_vals, height=h_bar, color='#CBD5E1', edgecolor='#64748B', label='Standalone Asset VaR (£)')
+    ax.barh(y_pos + h_bar/2, shapley_vals, height=h_bar, color='#2563EB', edgecolor='#1D4ED8', label='Shapley Component VaR (£)')
+    
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(t_names, fontsize=8.0, fontweight='bold', color='#1E293B')
+    ax.set_xlabel("Value-at-Risk (£ GBP)", fontsize=9, fontweight='bold', color='#1E293B')
+    ax.set_title("1-Day Shapley Risk Contribution vs Standalone Risk (£)", fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+    ax.xaxis.set_major_formatter(mticker.StrMethodFormatter('£{x:,.0f}'))
+    ax.grid(axis='x', linestyle='--', alpha=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=8, loc='lower right')
+    
+    max_v = max(max(shapley_vals), max(standalone_vals)) * 1.3
+    ax.set_xlim(0, max_v)
+    
+    for idx in range(len(t_names)):
+        pct_val = abs(float(rc_plot["SHAPLEY_VAR_PCT"].iloc[idx]))
+        ax.text(shapley_vals[idx] + 25, y_pos[idx] + h_bar/2, f"£{shapley_vals[idx]:,.0f} ({pct_val:.1f}%)", va='center', ha='left', fontsize=7.2, color='#1E3A8A', fontweight='bold')
+
+    plt.tight_layout()
+    plt.show()
+```
+
+# Statistical & Return Distribution Diagnostics
+
+Empirical moments and Quantile-Quantile (Q-Q) fat-tail diagnostics comparing portfolio return behavior against theoretical Gaussian normality.
+
+```{python}
+#| echo: false
+#| warning: false
+#| fig-width: 7.6
+#| fig-height: 3.6
+
+if not pv_df.empty and len(pv_df) >= 5:
+    pv_sorted = pv_df.sort_values("DATE").copy()
+    p_returns = pv_sorted["TOTAL_VALUE"].astype(float).pct_change().dropna()
+    pct_rets_raw = p_returns * 100.0
+    pct_rets = pct_rets_raw[np.isfinite(pct_rets_raw)]
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.6, 3.6), dpi=300)
+    
+    # 1. Histogram with Gaussian fit
+    ax1.hist(pct_rets, bins=30, density=True, color='#60A5FA', edgecolor='#2563EB', alpha=0.7, label='Daily Returns')
+    mu, std = pct_rets.mean(), pct_rets.std()
+    x = np.linspace(pct_rets.min(), pct_rets.max(), 200)
+    p = (1.0 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / std) ** 2)
+    ax1.plot(x, p, color='#DC2626', lw=2.0, label='Gaussian Fit')
+    ax1.axvline(mu, color='#1E3A8A', lw=1.5, linestyle=':', label=f'Mean: {mu:.2f}%')
+    
+    ax1.set_title("Empirical Return Distribution", fontsize=10, fontweight='bold', color='#0F172A')
+    ax1.set_xlabel("Daily Return (%)", fontsize=8.5, fontweight='bold')
+    ax1.set_ylabel("Probability Density", fontsize=8.5, fontweight='bold')
+    ax1.grid(True, linestyle='--', alpha=0.5)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.legend(fontsize=7.5)
+    
+    # 2. Q-Q Plot
+    (osm, osr), (slope, intercept, r) = stats.probplot(pct_rets, dist="norm")
+    ax2.plot(osm, osr, 'o', color='#3B82F6', markersize=3.5, alpha=0.8, label='Empirical Quantiles')
+    ax2.plot(osm, slope * np.array(osm) + intercept, color='#DC2626', lw=1.8, label='Normal Line')
+    
+    ax2.set_title("Q-Q Plot: Normal Quantiles vs Returns", fontsize=10, fontweight='bold', color='#0F172A')
+    ax2.set_xlabel("Theoretical Quantiles", fontsize=8.5, fontweight='bold')
+    ax2.set_ylabel("Sample Quantiles (%)", fontsize=8.5, fontweight='bold')
+    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.legend(fontsize=7.5)
+    
+    plt.tight_layout()
+    plt.show()
+```
+
+---
+*Report automatically compiled via **Quarto & Typst Engine** on the Portfolio Analytics & Risk Platform.*

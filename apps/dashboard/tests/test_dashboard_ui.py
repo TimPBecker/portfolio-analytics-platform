@@ -234,3 +234,35 @@ def test_benchmark_tables_and_shadow_calculations():
     assert float(day2_div_row["CASH"]) == 30.0
     assert float(day2_div_row["STOCKS"]) == 1100.0
     assert float(day2_div_row["TOTAL_VALUE"]) == 1130.0
+
+
+def test_quarto_report_template_discovery():
+    try:
+        from src.services.report_generator import find_report_template
+    except ImportError:
+        from apps.dashboard.src.services.report_generator import find_report_template
+
+    template = find_report_template()
+    assert template is not None
+    assert template.exists()
+    assert template.name == "portfolio_report.qmd"
+
+
+def test_quarto_typst_pdf_report_generation():
+    import shutil
+    if not shutil.which("quarto"):
+        pytest.skip("Quarto CLI not installed in current test runner environment")
+
+    try:
+        from src.services.report_generator import generate_portfolio_pdf_report
+    except ImportError:
+        from apps.dashboard.src.services.report_generator import generate_portfolio_pdf_report
+
+    success, pdf_path, pdf_bytes, err = generate_portfolio_pdf_report()
+    assert success is True
+    assert err is None
+    assert pdf_path is not None
+    assert pdf_bytes is not None
+    assert len(pdf_bytes) > 1000
+    assert pdf_bytes[:5] == b"%PDF-"
+

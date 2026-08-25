@@ -50,6 +50,14 @@ htmlcov/
 dagster_storage/
 storage/
 history/
+
+# Quarto and generated report artifacts
+.quarto/
+*_files/
+*.typ
+*.quarto_ipynb
 reports/*.png
 reports/*.jpg
 reports/*.pdf
+apps/dashboard/reports/*.pdf
+

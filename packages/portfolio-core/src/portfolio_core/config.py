@@ -11,9 +11,14 @@ from dotenv import load_dotenv
 
 
 def find_config_path(start_path: Optional[str] = None) -> Path:
-    """Finds config.yaml by searching upwards from current or start path."""
+    """Finds config.yaml by searching upwards from current or start path, and standard container paths."""
     current = Path(start_path).resolve() if start_path else Path.cwd().resolve()
     
+    # Check standard container mount locations first if they exist
+    for standard_path in [Path("/app/config.yaml"), Path("/opt/dagster/app/config.yaml")]:
+        if standard_path.is_file():
+            return standard_path
+
     # Check current directory and parent levels
     for p in [current, *current.parents[:4]]:
         cand = p / "config.yaml"
@@ -30,7 +35,11 @@ def find_config_path(start_path: Optional[str] = None) -> Path:
 
 
 def find_env_path(start_path: Optional[str] = None) -> Optional[Path]:
-    """Finds .env file by searching upwards to the repository root."""
+    """Finds .env file by searching upwards to the repository root and container paths."""
+    for standard_env in [Path("/app/.env"), Path("/opt/dagster/app/.env")]:
+        if standard_env.is_file():
+            return standard_env
+            
     current = Path(start_path).resolve() if start_path else Path.cwd().resolve()
     for p in [current, *current.parents[:4]]:
         cand = p / ".env"

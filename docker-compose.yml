@@ -62,6 +62,7 @@ services:
     volumes:
       - ./apps/dashboard:/app
       - ./packages/portfolio-core:/packages/portfolio-core
+      - ./reports:/reports
     ports:
       - "8501:8501"
 
