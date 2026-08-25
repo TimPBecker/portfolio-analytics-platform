@@ -17,6 +17,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && dpkg -i quarto-${QUARTO_VERSION}-linux-${ARCH}.deb \
     && rm quarto-${QUARTO_VERSION}-linux-${ARCH}.deb
 
+# Disable any telemetry in Quarto and Streamlit
+ENV QUARTO_DENY_TELEMETRY=1 \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
 WORKDIR /app
 
 # Copy shared core package and install it
