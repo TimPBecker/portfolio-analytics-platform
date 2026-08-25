@@ -18,7 +18,8 @@ from portfolio_core.db import (
     query_yahoo_close_price,
     fetch_and_store_ticker,
     fetch_and_store_fx_rate,
-    calculate_and_store_daily_portfolio_values
+    calculate_and_store_daily_portfolio_values,
+    calculate_and_store_daily_benchmark_values
 )
 
 try:
@@ -186,6 +187,7 @@ def render_tab_transactions():
                         fetch_and_store_ticker(ticker=ticker_input, engine=engine)
                         fetch_and_store_fx_rate(from_curr="USD", engine=engine)
                         calculate_and_store_daily_portfolio_values(backfill_days=30, engine=engine)
+                        calculate_and_store_daily_benchmark_values(engine=engine)
                     except Exception as e:
                         st.caption(f"Price sync note: {e}")
 
@@ -234,3 +236,5 @@ def render_tab_transactions():
             st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No active positions currently held.")
+
+

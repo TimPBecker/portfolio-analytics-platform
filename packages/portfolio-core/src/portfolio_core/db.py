@@ -5,6 +5,8 @@ dividend cashflow collection, and portfolio valuation independent of Dagster.
 """
 
 import os
+import re
+import json
 from urllib.parse import quote_plus
 from datetime import date
 from typing import Optional, List, Dict, Tuple, Any, Union
@@ -232,6 +234,43 @@ def create_all_tables(engine=None):
                 `CREATED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (`DATE`, `TICKER`, `METHOD`, `CONFIDENCE_LEVEL`, `HORIZON_DAYS`)
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARKS` (
+                `BENCHMARK_CODE` TEXT PRIMARY KEY,
+                `NAME` TEXT NOT NULL,
+                `DESCRIPTION` TEXT,
+                `CONSTITUENTS_JSON` TEXT NOT NULL,
+                `CREATED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARK_TRANSACTIONS` (
+                `ID` INTEGER PRIMARY KEY AUTOINCREMENT,
+                `ORIGINAL_TX_ID` INTEGER,
+                `BENCHMARK_CODE` TEXT NOT NULL,
+                `TICKER` TEXT NOT NULL,
+                `TRANSACTION_DATE` TEXT NOT NULL,
+                `QUANTITY` REAL NOT NULL,
+                `PRICE_GBP` REAL NOT NULL,
+                `GBP_VALUE` REAL NOT NULL,
+                `WEIGHT` REAL NOT NULL DEFAULT 1.0,
+                `CREATED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS `idx_bm_tx_code_date` ON `BENCHMARK_TRANSACTIONS` (`BENCHMARK_CODE`, `TRANSACTION_DATE`);
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARK_VALUES` (
+                `DATE` TEXT NOT NULL,
+                `BENCHMARK_CODE` TEXT NOT NULL,
+                `TOTAL_VALUE` REAL NOT NULL,
+                `STOCKS` REAL NOT NULL DEFAULT 0.0,
+                `CASH` REAL NOT NULL DEFAULT 0.0,
+                `CURRENCY` TEXT NOT NULL DEFAULT 'GBP',
+                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`)
+            );
             """
         ]
     else:
@@ -249,54 +288,55 @@ def create_all_tables(engine=None):
                 `id` INT AUTO_INCREMENT PRIMARY KEY,
                 `DATE` DATE NOT NULL,
                 `TICKER` VARCHAR(255) NOT NULL,
-                `OPEN` DECIMAL(12, 4) DEFAULT NULL,
-                `HIGH` DECIMAL(12, 4) DEFAULT NULL,
-                `LOW` DECIMAL(12, 4) DEFAULT NULL,
-                `CLOSE` DECIMAL(12, 4) DEFAULT NULL,
-                `VOLUME` BIGINT DEFAULT NULL,
-                `DIVIDENDS` DECIMAL(10, 4) DEFAULT NULL,
-                `STOCK_SPLITS` DECIMAL(10, 4) DEFAULT NULL,
                 `CURRENCY` VARCHAR(10) NOT NULL,
+                `OPEN` DECIMAL(12, 4) NOT NULL,
+                `HIGH` DECIMAL(12, 4) NOT NULL,
+                `LOW` DECIMAL(12, 4) NOT NULL,
+                `CLOSE` DECIMAL(12, 4) NOT NULL,
+                `VOLUME` BIGINT NOT NULL,
                 `COMMENT` VARCHAR(255) DEFAULT NULL,
-                INDEX `idx_asset_prices_ticker_date` (`TICKER`, `DATE`)
+                `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY `unique_date_ticker` (`DATE`, `TICKER`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """,
             """
             CREATE TABLE IF NOT EXISTS `FX_RATES` (
-                `DATE` VARCHAR(10) NOT NULL,
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `DATE` DATE NOT NULL,
                 `FROM_CURRENCY` VARCHAR(10) NOT NULL,
-                `TO_CURRENCY` VARCHAR(10) NOT NULL DEFAULT 'GBP',
-                `RATE` DOUBLE NOT NULL,
-                `OPEN` DOUBLE DEFAULT NULL,
-                `HIGH` DOUBLE DEFAULT NULL,
-                `LOW` DOUBLE DEFAULT NULL,
-                `CLOSE` DOUBLE DEFAULT NULL,
+                `TO_CURRENCY` VARCHAR(10) NOT NULL,
+                `RATE` DECIMAL(12, 6) NOT NULL,
+                `OPEN` DECIMAL(12, 6) DEFAULT NULL,
+                `HIGH` DECIMAL(12, 6) DEFAULT NULL,
+                `LOW` DECIMAL(12, 6) DEFAULT NULL,
+                `CLOSE` DECIMAL(12, 6) DEFAULT NULL,
                 `COMMENT` VARCHAR(255) DEFAULT NULL,
-                INDEX `idx_fx_rates_pair_date` (`FROM_CURRENCY`, `TO_CURRENCY`, `DATE`)
+                `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY `unique_date_currencies` (`DATE`, `FROM_CURRENCY`, `TO_CURRENCY`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """,
             """
             CREATE TABLE IF NOT EXISTS `CASHFLOWS` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
                 `DATE` DATE NOT NULL,
                 `TICKER` VARCHAR(255) NOT NULL,
-                `TYPE` VARCHAR(50) NOT NULL DEFAULT 'DIVIDEND',
-                `SHARES` DECIMAL(15, 6) NOT NULL,
                 `DIVIDEND_PER_SHARE` DECIMAL(12, 4) NOT NULL,
-                `AMOUNT` DECIMAL(15, 2) NOT NULL COMMENT 'Dividend payout in original currency',
-                `CURRENCY` VARCHAR(10) NOT NULL COMMENT 'Payment currency',
-                `AMOUNT_GBP` DECIMAL(15, 2) NOT NULL COMMENT 'Dividend payout converted to GBP',
+                `SHARES_HELD` DECIMAL(15, 6) NOT NULL,
+                `CURRENCY` VARCHAR(10) NOT NULL,
+                `GROSS_AMOUNT` DECIMAL(15, 2) NOT NULL,
+                `COMMENT` VARCHAR(255) DEFAULT NULL,
                 `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                PRIMARY KEY (`DATE`, `TICKER`, `TYPE`)
+                UNIQUE KEY `unique_date_ticker_div` (`DATE`, `TICKER`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """,
             """
             CREATE TABLE IF NOT EXISTS `CASHACCOUNT` (
                 `DATE` DATE NOT NULL,
                 `CURRENCY` VARCHAR(10) NOT NULL,
-                `DAILY_AMOUNT` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Net cashflow on this date in original currency',
-                `DAILY_AMOUNT_GBP` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Net cashflow on this date converted to GBP',
-                `CUMULATIVE_AMOUNT` DECIMAL(15, 2) NOT NULL COMMENT 'Cumulative cash balance in original currency up to this date',
-                `CUMULATIVE_AMOUNT_GBP` DECIMAL(15, 2) NOT NULL COMMENT 'Cumulative cash balance converted to GBP up to this date',
+                `DAILY_AMOUNT` DECIMAL(15, 2) NOT NULL,
+                `DAILY_AMOUNT_GBP` DECIMAL(15, 2) NOT NULL,
+                `CUMULATIVE_AMOUNT` DECIMAL(15, 2) NOT NULL,
+                `CUMULATIVE_AMOUNT_GBP` DECIMAL(15, 2) NOT NULL,
                 `UPDATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (`DATE`, `CURRENCY`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -304,9 +344,9 @@ def create_all_tables(engine=None):
             """
             CREATE TABLE IF NOT EXISTS `PORTFOLIO_VALUES` (
                 `DATE` DATE NOT NULL,
-                `TOTAL_VALUE` DECIMAL(15, 2) NOT NULL COMMENT 'Total portfolio valuation (STOCKS + CASH)',
-                `STOCKS` DECIMAL(15, 2) NOT NULL COMMENT 'Market value of stock holdings',
-                `CASH` DECIMAL(15, 2) NOT NULL COMMENT 'Cumulative cash balance from CASHACCOUNT',
+                `TOTAL_VALUE` DECIMAL(15, 2) NOT NULL COMMENT 'Total portfolio valuation in GBP (STOCKS + CASH)',
+                `STOCKS` DECIMAL(15, 2) NOT NULL COMMENT 'Market value of all active stock holdings in GBP',
+                `CASH` DECIMAL(15, 2) NOT NULL COMMENT 'Cash account balance in GBP from cumulative dividends',
                 `CURRENCY` VARCHAR(3) NOT NULL DEFAULT 'GBP',
                 PRIMARY KEY (`DATE`, `CURRENCY`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -336,7 +376,7 @@ def create_all_tables(engine=None):
                 `SHARES` DECIMAL(15, 6) DEFAULT NULL,
                 `PRICE_GBP` DECIMAL(12, 4) DEFAULT NULL,
                 `POSITION_VALUE_GBP` DECIMAL(15, 2) DEFAULT NULL,
-                `LOG_RETURN` DECIMAL(12, 6) DEFAULT NULL,
+                `LOG_RETURN` DECIMAL(10, 6) DEFAULT NULL,
                 `SCENARIO_PNL_GBP` DECIMAL(15, 2) NOT NULL,
                 `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (`ASOF_DATE`, `SCENARIO_DATE`, `TICKER`, `METHOD`)
@@ -360,6 +400,41 @@ def create_all_tables(engine=None):
                 `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (`DATE`, `TICKER`, `METHOD`, `CONFIDENCE_LEVEL`, `HORIZON_DAYS`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARKS` (
+                `BENCHMARK_CODE` VARCHAR(255) PRIMARY KEY,
+                `NAME` VARCHAR(255) NOT NULL,
+                `DESCRIPTION` VARCHAR(255) DEFAULT NULL,
+                `CONSTITUENTS_JSON` TEXT NOT NULL,
+                `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARK_TRANSACTIONS` (
+                `ID` INT AUTO_INCREMENT PRIMARY KEY,
+                `ORIGINAL_TX_ID` INT DEFAULT NULL,
+                `BENCHMARK_CODE` VARCHAR(255) NOT NULL,
+                `TICKER` VARCHAR(255) NOT NULL,
+                `TRANSACTION_DATE` DATE NOT NULL,
+                `QUANTITY` DECIMAL(15, 6) NOT NULL,
+                `PRICE_GBP` DECIMAL(12, 4) NOT NULL,
+                `GBP_VALUE` DECIMAL(15, 2) NOT NULL,
+                `WEIGHT` DECIMAL(6, 4) NOT NULL DEFAULT 1.0000,
+                `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX `idx_bm_tx_code_date` (`BENCHMARK_CODE`, `TRANSACTION_DATE`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `BENCHMARK_VALUES` (
+                `DATE` DATE NOT NULL,
+                `BENCHMARK_CODE` VARCHAR(255) NOT NULL,
+                `TOTAL_VALUE` DECIMAL(15, 2) NOT NULL COMMENT 'Total benchmark portfolio valuation in GBP (STOCKS + CASH)',
+                `STOCKS` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Market value of benchmark constituent shares in GBP',
+                `CASH` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Cash account balance in GBP from cumulative benchmark dividends',
+                `CURRENCY` VARCHAR(3) NOT NULL DEFAULT 'GBP',
+                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
         ]
     
@@ -378,23 +453,170 @@ def create_all_tables(engine=None):
         except Exception:
             pass
 
+        # Schema migration check: If BENCHMARKS has old TICKER column instead of BENCHMARK_CODE, recreate tables
+        try:
+            if is_sqlite:
+                bm_cols = [c[1] for c in conn.execute(text("PRAGMA table_info(BENCHMARKS)")).fetchall()]
+            else:
+                bm_cols = [c[0] for c in conn.execute(text("SHOW COLUMNS FROM `BENCHMARKS`")).fetchall()]
+            if bm_cols and "BENCHMARK_CODE" not in bm_cols:
+                conn.execute(text("DROP TABLE IF EXISTS `BENCHMARK_VALUES`"))
+                conn.execute(text("DROP TABLE IF EXISTS `BENCHMARK_TRANSACTIONS`"))
+                conn.execute(text("DROP TABLE IF EXISTS `BENCHMARKS`"))
+                conn.commit()
+        except Exception:
+            pass
+
+        # Schema migration check: If BENCHMARK_VALUES lacks CASH or STOCKS, recreate table
+        try:
+            if is_sqlite:
+                bv_cols = [c[1] for c in conn.execute(text("PRAGMA table_info(BENCHMARK_VALUES)")).fetchall()]
+            else:
+                bv_cols = [c[0] for c in conn.execute(text("SHOW COLUMNS FROM `BENCHMARK_VALUES`")).fetchall()]
+            if bv_cols and ("CASH" not in bv_cols or "STOCKS" not in bv_cols):
+                conn.execute(text("DROP TABLE IF EXISTS `BENCHMARK_VALUES`"))
+                conn.commit()
+        except Exception:
+            pass
+
         for stmt in ddl_statements:
             conn.execute(text(stmt))
         conn.commit()
 
+        # Seed default benchmarks if table is empty
+        try:
+            bm_count = conn.execute(text("SELECT COUNT(*) FROM `BENCHMARKS`")).scalar()
+            if not bm_count:
+                default_benchmarks = [
+                    {
+                        "code": "CSP1.L_100",
+                        "name": "S&P 500 UCITS ETF",
+                        "desc": "S&P 500 US Large Cap Equities",
+                        "constituents": json.dumps({"CSP1.L": 1.0})
+                    },
+                    {
+                        "code": "VWRL.L_100",
+                        "name": "FTSE All-World UCITS ETF",
+                        "desc": "Global Large & Mid Cap Equities",
+                        "constituents": json.dumps({"VWRL.L": 1.0})
+                    },
+                    {
+                        "code": "VUKE.L_100",
+                        "name": "FTSE 100 UCITS ETF",
+                        "desc": "UK Large Cap Equities",
+                        "constituents": json.dumps({"VUKE.L": 1.0})
+                    },
+                    {
+                        "code": "CSP1.L_60_VUKE.L_40",
+                        "name": "US/UK 60/40 Equity Balanced",
+                        "desc": "60% S&P 500, 40% FTSE 100",
+                        "constituents": json.dumps({"CSP1.L": 0.6, "VUKE.L": 0.4})
+                    }
+                ]
+                for bm in default_benchmarks:
+                    conn.execute(
+                        text("INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`) VALUES (:code, :name, :desc, :constituents)"),
+                        bm
+                    )
+                conn.commit()
+        except Exception:
+            pass
+
+
+def generate_benchmark_fallback_name(constituents: Dict[str, float]) -> str:
+    """
+    Builds the fallback benchmark name in the format: 'TICKER1_PERCENT1_TICKER2_PERCENT2_...'
+    E.g. {'CSP1.L': 0.60, 'VUKE.L': 0.40} -> 'CSP1.L_60_VUKE.L_40'
+         {'VWRL.L': 1.00} -> 'VWRL.L_100'
+    """
+    parts = []
+    total_w = sum(constituents.values())
+    for ticker, weight in constituents.items():
+        clean_t = str(ticker).strip().upper()
+        pct = (weight / total_w) * 100.0 if total_w > 0 else weight * 100.0
+        pct_str = f"{int(round(pct))}" if round(pct, 2).is_integer() else f"{round(pct, 2)}"
+        parts.append(f"{clean_t}_{pct_str}")
+    return "_".join(parts)
+
+
+def parse_benchmark_constituents(constituents_input: Any) -> Dict[str, float]:
+    """
+    Parses and normalizes benchmark constituents input into a dict of {ticker: weight} where sum(weights) == 1.0.
+    Supports dicts, lists of (ticker, weight) pairs, and string formats (JSON, 'CSP1.L:60, VUKE.L:40', 'CSP1.L_60_VUKE.L_40').
+    """
+    if isinstance(constituents_input, dict):
+        raw_map = {str(k).strip().upper(): float(v) for k, v in constituents_input.items() if float(v) > 0}
+    elif isinstance(constituents_input, (list, tuple)):
+        raw_map = {}
+        for item in constituents_input:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                raw_map[str(item[0]).strip().upper()] = float(item[1])
+            elif isinstance(item, str):
+                raw_map[str(item).strip().upper()] = 1.0
+    elif isinstance(constituents_input, str):
+        raw_str = constituents_input.strip()
+        if raw_str.startswith("{") and raw_str.endswith("}"):
+            raw_map = {str(k).strip().upper(): float(v) for k, v in json.loads(raw_str).items() if float(v) > 0}
+        elif ":" in raw_str or "," in raw_str:
+            raw_map = {}
+            for part in re.split(r"[,;]", raw_str):
+                if ":" in part:
+                    t, w = part.split(":", 1)
+                    raw_map[t.strip().upper()] = float(w.replace("%", "").strip())
+                elif part.strip():
+                    raw_map[part.strip().upper()] = 1.0
+        elif "_" in raw_str:
+            tokens = raw_str.split("_")
+            raw_map = {}
+            i = 0
+            while i < len(tokens):
+                t = tokens[i].strip().upper()
+                if i + 1 < len(tokens) and re.match(r"^\d+(\.\d+)?$", tokens[i + 1]):
+                    w = float(tokens[i + 1])
+                    i += 2
+                else:
+                    w = 1.0
+                    i += 1
+                raw_map[t] = w
+        else:
+            raw_map = {raw_str.upper(): 1.0}
+    else:
+        raise ValueError(f"Invalid constituents input: {constituents_input}")
+
+    total_w = sum(raw_map.values())
+    if total_w <= 0:
+        raise ValueError("Total constituent weight must be greater than zero.")
+
+    return {t: round(w / total_w, 6) for t, w in raw_map.items()}
+
 
 def fetch_all_historical_tickers(engine=None) -> List[str]:
     """
-    Retrieves all unique tickers that have ever appeared in the TRANSACTIONS table,
-    including both currently held and previously held positions.
+    Retrieves all unique tickers from both TRANSACTIONS and BENCHMARKS (all constituents),
+    including currently held, previously held, and all benchmark assets.
     """
     engine = engine or get_engine()
     create_all_tables(engine)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT DISTINCT `TICKER` FROM `TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> '' ORDER BY `TICKER` ASC")
+        tx_rows = conn.execute(
+            text("SELECT DISTINCT `TICKER` FROM `TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")
         ).scalars().all()
-        return [str(r) for r in rows if r]
+        bm_tickers = []
+        try:
+            bm_json_rows = conn.execute(
+                text("SELECT `CONSTITUENTS_JSON` FROM `BENCHMARKS` WHERE `CONSTITUENTS_JSON` IS NOT NULL")
+            ).scalars().all()
+            for j_str in bm_json_rows:
+                try:
+                    c_map = json.loads(j_str)
+                    bm_tickers.extend(list(c_map.keys()))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        all_tickers = sorted(list(set([str(r).strip().upper() for r in tx_rows if r] + [str(b).strip().upper() for b in bm_tickers if b])))
+        return all_tickers
 
 
 def fetch_portfolio_positions(asof_date=None, asof=None, engine=None):
@@ -2268,3 +2490,445 @@ def query_yahoo_close_price(
         "close_price_gbp": close_price_gbp,
         "status": "success"
     }
+
+
+def fetch_benchmarks_info(engine: Optional[Engine] = None) -> pd.DataFrame:
+    """
+    Fetches registered benchmarks from the BENCHMARKS table.
+    Returns DataFrame with BENCHMARK_CODE, NAME, DESCRIPTION, CONSTITUENTS_JSON, and CONSTITUENTS_DISPLAY.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+    with eng.connect() as conn:
+        df = pd.read_sql(
+            text("SELECT `BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON` FROM `BENCHMARKS` ORDER BY `BENCHMARK_CODE` ASC"),
+            conn
+        )
+    if not df.empty:
+        displays = []
+        for _, r in df.iterrows():
+            try:
+                c_dict = json.loads(r["CONSTITUENTS_JSON"])
+                parts = [f"{t} ({w*100:.0f}%)" if (w*100).is_integer() else f"{t} ({w*100:.1f}%)" for t, w in c_dict.items()]
+                displays.append(", ".join(parts))
+            except Exception:
+                displays.append(str(r["CONSTITUENTS_JSON"]))
+        df["CONSTITUENTS_DISPLAY"] = displays
+    else:
+        df = pd.DataFrame(columns=["BENCHMARK_CODE", "NAME", "DESCRIPTION", "CONSTITUENTS_JSON", "CONSTITUENTS_DISPLAY"])
+    return df
+
+
+def add_benchmark(
+    constituents: Any = None,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    benchmark_code: Optional[str] = None,
+    ticker: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> Dict[str, Any]:
+    """
+    Adds or updates a benchmark defined as a linear combination of tickers.
+    - constituents: Dict[str, float] (e.g. {'CSP1.L': 0.60, 'VUKE.L': 0.40}) or string 'CSP1.L:60, VUKE.L:40'.
+    - name: Optional display name. Falls back to 'TICKER1_PERCENT1_TICKER2_PERCENT2_...'.
+    - benchmark_code: Unique benchmark code (defaults to fallback name).
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    input_c = constituents if constituents is not None else ticker
+    if input_c is None:
+        raise ValueError("Must provide benchmark constituents or ticker.")
+
+    c_map = parse_benchmark_constituents(input_c)
+    fallback_name = generate_benchmark_fallback_name(c_map)
+
+    final_name = str(name).strip() if name and str(name).strip() else fallback_name
+    final_code = str(benchmark_code).strip().upper() if benchmark_code and str(benchmark_code).strip() else fallback_name
+    desc = str(description).strip() if description else f"Linear Combination ({', '.join([f'{t}: {w*100:.1f}%' for t, w in c_map.items()])})"
+    c_json = json.dumps(c_map)
+
+    if eng.dialect.name == "sqlite":
+        sql = """
+        INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`)
+        VALUES (:code, :name, :desc, :c_json)
+        ON CONFLICT(`BENCHMARK_CODE`) DO UPDATE SET
+            `NAME` = excluded.`NAME`,
+            `DESCRIPTION` = excluded.`DESCRIPTION`,
+            `CONSTITUENTS_JSON` = excluded.`CONSTITUENTS_JSON`;
+        """
+    else:
+        sql = """
+        INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`)
+        VALUES (:code, :name, :desc, :c_json)
+        ON DUPLICATE KEY UPDATE
+            `NAME` = VALUES(`NAME`),
+            `DESCRIPTION` = VALUES(`DESCRIPTION`),
+            `CONSTITUENTS_JSON` = VALUES(`CONSTITUENTS_JSON`);
+        """
+
+    with eng.connect() as conn:
+        conn.execute(text(sql), {"code": final_code, "name": final_name, "desc": desc, "c_json": c_json})
+        conn.commit()
+
+    # Pre-fetch prices and FX for each constituent ticker
+    for c_ticker in c_map.keys():
+        try:
+            fetch_and_store_ticker(c_ticker, engine=eng)
+            foreign_currs = get_foreign_currencies_from_prices(engine=eng)
+            for c in foreign_currs:
+                fetch_and_store_fx_rate(from_curr=c, engine=eng)
+        except Exception:
+            pass
+
+    return {
+        "benchmark_code": final_code,
+        "name": final_name,
+        "description": desc,
+        "constituents": c_map,
+        "status": "success"
+    }
+
+
+def delete_benchmark(benchmark_code: str, engine: Optional[Engine] = None) -> bool:
+    """
+    Removes a benchmark along with its generated shadow transactions and historical values.
+    """
+    eng = engine or get_engine()
+    code_clean = str(benchmark_code).strip().upper()
+    with eng.connect() as conn:
+        conn.execute(text("DELETE FROM `BENCHMARK_VALUES` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
+        conn.execute(text("DELETE FROM `BENCHMARK_TRANSACTIONS` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
+        conn.execute(text("DELETE FROM `BENCHMARKS` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
+        conn.commit()
+    return True
+
+
+def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -> pd.DataFrame:
+    """
+    For every portfolio transaction in TRANSACTIONS, computes the transaction value in GBP on that date,
+    and generates corresponding shadow transactions across constituent tickers in BENCHMARK_TRANSACTIONS
+    for each active benchmark in the BENCHMARKS table according to its linear combination weights.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    with eng.connect() as conn:
+        tx_df = pd.read_sql(
+            text("SELECT `ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY` FROM `TRANSACTIONS` ORDER BY `TRANSACTION_DATE` ASC, `ID` ASC"),
+            conn
+        )
+        bm_df = pd.read_sql(
+            text("SELECT `BENCHMARK_CODE`, `NAME`, `CONSTITUENTS_JSON` FROM `BENCHMARKS` ORDER BY `BENCHMARK_CODE` ASC"),
+            conn
+        )
+
+    if tx_df.empty or bm_df.empty:
+        return pd.DataFrame(columns=["ORIGINAL_TX_ID", "BENCHMARK_CODE", "TICKER", "TRANSACTION_DATE", "QUANTITY", "PRICE_GBP", "GBP_VALUE", "WEIGHT"])
+
+    tx_df["TRANSACTION_DATE"] = pd.to_datetime(tx_df["TRANSACTION_DATE"]).dt.strftime("%Y-%m-%d")
+
+    prices_gbp = fetch_historical_prices_gbp(engine=eng)
+    if prices_gbp.empty:
+        return pd.DataFrame(columns=["ORIGINAL_TX_ID", "BENCHMARK_CODE", "TICKER", "TRANSACTION_DATE", "QUANTITY", "PRICE_GBP", "GBP_VALUE", "WEIGHT"])
+
+    price_matrix = prices_gbp.ffill().bfill()
+    price_dates = sorted(price_matrix.index.tolist())
+
+    bm_tx_records = []
+
+    for _, tx in tx_df.iterrows():
+        tx_id = int(tx["ID"])
+        tx_ticker = str(tx["TICKER"])
+        tx_date = str(tx["TRANSACTION_DATE"])
+        tx_qty = float(tx["QUANTITY"])
+
+        # Determine asset price in GBP on or nearest to transaction date
+        if tx_ticker in price_matrix.columns:
+            if tx_date in price_matrix.index:
+                asset_px = float(price_matrix.loc[tx_date, tx_ticker])
+            else:
+                prior_dates = [d for d in price_dates if str(d)[:10] <= tx_date]
+                ref_date = prior_dates[-1] if prior_dates else price_dates[0]
+                asset_px = float(price_matrix.loc[ref_date, tx_ticker])
+        else:
+            asset_px = 0.0
+
+        total_tx_gbp = round(tx_qty * asset_px, 2)
+
+        # Generate matching shadow trades for each benchmark constituent
+        for _, bm in bm_df.iterrows():
+            bm_code = str(bm["BENCHMARK_CODE"])
+            try:
+                c_map = json.loads(bm["CONSTITUENTS_JSON"])
+            except Exception:
+                c_map = {bm_code: 1.0}
+
+            for c_ticker, c_weight in c_map.items():
+                c_ticker = str(c_ticker).strip().upper()
+                c_weight = float(c_weight)
+
+                if c_ticker not in price_matrix.columns:
+                    try:
+                        fetch_and_store_ticker(c_ticker, engine=eng)
+                        prices_gbp = fetch_historical_prices_gbp(engine=eng)
+                        price_matrix = prices_gbp.ffill().bfill()
+                    except Exception:
+                        pass
+
+                if c_ticker in price_matrix.columns:
+                    if tx_date in price_matrix.index:
+                        c_px = float(price_matrix.loc[tx_date, c_ticker])
+                    else:
+                        prior_dates = [d for d in price_dates if str(d)[:10] <= tx_date]
+                        ref_date = prior_dates[-1] if prior_dates else price_dates[0]
+                        c_px = float(price_matrix.loc[ref_date, c_ticker])
+                else:
+                    c_px = 1.0
+
+                c_gbp_val = round(total_tx_gbp * c_weight, 2)
+                c_qty = (c_gbp_val / c_px) if c_px > 0 else 0.0
+
+                bm_tx_records.append({
+                    "ORIGINAL_TX_ID": tx_id,
+                    "BENCHMARK_CODE": bm_code,
+                    "TICKER": c_ticker,
+                    "TRANSACTION_DATE": tx_date,
+                    "QUANTITY": round(c_qty, 6),
+                    "PRICE_GBP": round(c_px, 4),
+                    "GBP_VALUE": c_gbp_val,
+                    "WEIGHT": round(c_weight, 4)
+                })
+
+    if not bm_tx_records:
+        return pd.DataFrame(columns=["ORIGINAL_TX_ID", "BENCHMARK_CODE", "TICKER", "TRANSACTION_DATE", "QUANTITY", "PRICE_GBP", "GBP_VALUE", "WEIGHT"])
+
+    bm_tx_df = pd.DataFrame(bm_tx_records)
+
+    with eng.connect() as conn:
+        conn.execute(text("DELETE FROM `BENCHMARK_TRANSACTIONS`"))
+        conn.commit()
+
+    bm_tx_df.to_sql("BENCHMARK_TRANSACTIONS", con=eng, if_exists="append", index=False)
+    return bm_tx_df
+
+
+def calculate_and_store_daily_benchmark_values(engine: Optional[Engine] = None) -> Dict[str, Any]:
+    """
+    Calculates daily benchmark valuations for every date in history by:
+    1. Replaying cumulative shadow share positions per constituent from BENCHMARK_TRANSACTIONS.
+    2. Multiplying cumulative shares by daily closing constituent price in GBP from ASSET_PRICES/FX_RATES (STOCKS).
+    3. Collecting cash from constituent dividend events into the benchmark cash account (CASH).
+    4. Computing TOTAL_VALUE = STOCKS + CASH for each benchmark.
+    5. Upserting into BENCHMARK_VALUES (DATE, BENCHMARK_CODE, TOTAL_VALUE, STOCKS, CASH, CURRENCY).
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    # Ensure shadow benchmark transactions are generated first
+    generate_and_store_benchmark_transactions(engine=eng)
+
+    with eng.connect() as conn:
+        bm_tx_df = pd.read_sql(
+            text("SELECT `BENCHMARK_CODE`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY`, `WEIGHT` FROM `BENCHMARK_TRANSACTIONS` ORDER BY `TRANSACTION_DATE` ASC"),
+            conn
+        )
+        bm_df = pd.read_sql(
+            text("SELECT `BENCHMARK_CODE`, `CONSTITUENTS_JSON` FROM `BENCHMARKS`"),
+            conn
+        )
+        div_prices = pd.read_sql(
+            text("SELECT `DATE`, `TICKER`, `DIVIDENDS`, `CURRENCY` FROM `ASSET_PRICES` WHERE `DIVIDENDS` > 0 ORDER BY `DATE` ASC"),
+            conn
+        )
+        fx_df = pd.read_sql(
+            text("SELECT `DATE`, `FROM_CURRENCY`, `RATE` FROM `FX_RATES` WHERE `TO_CURRENCY` = 'GBP'"),
+            conn
+        )
+
+    if bm_tx_df.empty or bm_df.empty:
+        return {"records_stored": 0, "summary_df": pd.DataFrame()}
+
+    bm_tx_df["TRANSACTION_DATE"] = pd.to_datetime(bm_tx_df["TRANSACTION_DATE"]).dt.strftime("%Y-%m-%d")
+
+    # Build dividend in GBP per share lookup: (DATE, TICKER) -> DIVIDEND_GBP
+    div_gbp_map: Dict[Tuple[str, str], float] = {}
+    if not div_prices.empty:
+        div_prices["DATE"] = pd.to_datetime(div_prices["DATE"]).dt.strftime("%Y-%m-%d")
+        if not fx_df.empty:
+            fx_df["DATE"] = pd.to_datetime(fx_df["DATE"]).dt.strftime("%Y-%m-%d")
+            div_merged = pd.merge(div_prices, fx_df, left_on=["DATE", "CURRENCY"], right_on=["DATE", "FROM_CURRENCY"], how="left")
+        else:
+            div_merged = div_prices.copy()
+            div_merged["RATE"] = 1.0
+        div_merged.loc[div_merged["CURRENCY"].isin(["GBp", "GBX", "GBp_PENCE"]) & div_merged["RATE"].isna(), "RATE"] = 0.01
+        div_merged.loc[(div_merged["CURRENCY"] == "GBP") & div_merged["RATE"].isna(), "RATE"] = 1.0
+        div_merged["RATE"] = div_merged["RATE"].fillna(1.0)
+        div_merged["DIV_GBP"] = div_merged["DIVIDENDS"].astype(float) * div_merged["RATE"].astype(float)
+        for _, r in div_merged.iterrows():
+            div_gbp_map[(str(r["DATE"]), str(r["TICKER"]).upper())] = float(r["DIV_GBP"])
+
+    prices_gbp = fetch_historical_prices_gbp(engine=eng)
+    if prices_gbp.empty:
+        return {"records_stored": 0, "summary_df": pd.DataFrame()}
+
+    price_matrix = prices_gbp.sort_index().ffill()
+    price_dates = [str(d)[:10] for d in price_matrix.index]
+    tx_dates = bm_tx_df["TRANSACTION_DATE"].tolist()
+    full_date_range = sorted(list(set(price_dates + tx_dates)))
+
+    all_val_records = []
+
+    for _, bm in bm_df.iterrows():
+        bm_code = str(bm["BENCHMARK_CODE"])
+        bm_sub = bm_tx_df[bm_tx_df["BENCHMARK_CODE"] == bm_code]
+        if bm_sub.empty:
+            continue
+
+        try:
+            c_map = json.loads(bm["CONSTITUENTS_JSON"])
+        except Exception:
+            c_map = {bm_code: 1.0}
+
+        # Calculate daily stock value contribution and dividend cash arrivals for each constituent
+        bm_daily_stocks = pd.Series(0.0, index=full_date_range)
+        bm_daily_cashflow = pd.Series(0.0, index=full_date_range)
+
+        for c_ticker in c_map.keys():
+            c_ticker = str(c_ticker).strip().upper()
+            c_tx = bm_sub[bm_sub["TICKER"] == c_ticker]
+            if c_tx.empty or c_ticker not in price_matrix.columns:
+                continue
+
+            tx_pivot = c_tx.groupby("TRANSACTION_DATE")["QUANTITY"].sum()
+            shares_series = tx_pivot.reindex(full_date_range).fillna(0.0).cumsum()
+            px_series = price_matrix[c_ticker].reindex(full_date_range).ffill().bfill()
+
+            c_val_series = shares_series * px_series
+            bm_daily_stocks = bm_daily_stocks.add(c_val_series, fill_value=0.0)
+
+            # Check dividend payouts for held constituent shares
+            for dt_str in full_date_range:
+                div_px = div_gbp_map.get((dt_str, c_ticker), 0.0)
+                if div_px > 0:
+                    held_sh = float(shares_series.get(dt_str, 0.0))
+                    if held_sh > 0:
+                        bm_daily_cashflow[dt_str] += held_sh * div_px
+
+        # Cumulative cash account balance for the benchmark shadow portfolio
+        bm_cum_cash = bm_daily_cashflow.cumsum()
+
+        for dt_str in full_date_range:
+            stk_val = float(bm_daily_stocks.get(dt_str, 0.0))
+            csh_val = float(bm_cum_cash.get(dt_str, 0.0))
+            tot_val = stk_val + csh_val
+            all_val_records.append({
+                "DATE": dt_str,
+                "BENCHMARK_CODE": bm_code,
+                "TOTAL_VALUE": round(tot_val, 2),
+                "STOCKS": round(stk_val, 2),
+                "CASH": round(csh_val, 2),
+                "CURRENCY": "GBP"
+            })
+
+    if not all_val_records:
+        return {"records_stored": 0, "summary_df": pd.DataFrame()}
+
+    val_df = pd.DataFrame(all_val_records)
+
+    if eng.dialect.name == "sqlite":
+        upsert_sql = """
+        INSERT INTO `BENCHMARK_VALUES` (`DATE`, `BENCHMARK_CODE`, `TOTAL_VALUE`, `STOCKS`, `CASH`, `CURRENCY`)
+        VALUES (:DATE, :BENCHMARK_CODE, :TOTAL_VALUE, :STOCKS, :CASH, :CURRENCY)
+        ON CONFLICT(`DATE`, `BENCHMARK_CODE`) DO UPDATE SET
+            `TOTAL_VALUE` = excluded.`TOTAL_VALUE`,
+            `STOCKS` = excluded.`STOCKS`,
+            `CASH` = excluded.`CASH`,
+            `CURRENCY` = excluded.`CURRENCY`;
+        """
+    else:
+        upsert_sql = """
+        INSERT INTO `BENCHMARK_VALUES` (`DATE`, `BENCHMARK_CODE`, `TOTAL_VALUE`, `STOCKS`, `CASH`, `CURRENCY`)
+        VALUES (:DATE, :BENCHMARK_CODE, :TOTAL_VALUE, :STOCKS, :CASH, :CURRENCY)
+        ON DUPLICATE KEY UPDATE
+            `TOTAL_VALUE` = VALUES(`TOTAL_VALUE`),
+            `STOCKS` = VALUES(`STOCKS`),
+            `CASH` = VALUES(`CASH`),
+            `CURRENCY` = VALUES(`CURRENCY`);
+        """
+
+    with eng.connect() as conn:
+        conn.execute(text(upsert_sql), all_val_records)
+        conn.commit()
+
+    return {"records_stored": len(all_val_records), "summary_df": val_df}
+
+
+def fetch_benchmark_values_history(
+    benchmark_code: Optional[str] = None,
+    days: int = 365,
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> pd.DataFrame:
+    """
+    Fetches historical daily benchmark valuations from BENCHMARK_VALUES table.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    where_clauses = []
+    params: Dict[str, Any] = {}
+
+    if benchmark_code:
+        where_clauses.append("`BENCHMARK_CODE` = :b")
+        params["b"] = str(benchmark_code).strip().upper()
+
+    if asof_date:
+        where_clauses.append("`DATE` <= :asof")
+        params["asof"] = str(asof_date)[:10]
+
+    where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    query = f"""
+        SELECT `DATE`, `BENCHMARK_CODE`, `TOTAL_VALUE`, `STOCKS`, `CASH`, `CURRENCY`
+        FROM `BENCHMARK_VALUES`
+        {where_str}
+        ORDER BY `DATE` ASC, `BENCHMARK_CODE` ASC
+    """
+
+    with eng.connect() as conn:
+        df = pd.read_sql(text(query), conn, params=params)
+
+    if df.empty:
+        return pd.DataFrame(columns=["DATE", "BENCHMARK_CODE", "TOTAL_VALUE", "STOCKS", "CASH", "CURRENCY"])
+
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    return df.sort_values("DATE").reset_index(drop=True)
+
+
+def fetch_benchmark_transactions(
+    benchmark_code: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> pd.DataFrame:
+    """
+    Fetches generated benchmark shadow transactions from BENCHMARK_TRANSACTIONS table.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    where_clause = "WHERE `BENCHMARK_CODE` = :b" if benchmark_code else ""
+    params = {"b": str(benchmark_code).strip().upper()} if benchmark_code else {}
+
+    query = f"""
+        SELECT `ID`, `ORIGINAL_TX_ID`, `BENCHMARK_CODE`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY`, `PRICE_GBP`, `GBP_VALUE`, `WEIGHT`, `CREATED_AT`
+        FROM `BENCHMARK_TRANSACTIONS`
+        {where_clause}
+        ORDER BY `TRANSACTION_DATE` DESC, `ID` DESC
+    """
+
+    with eng.connect() as conn:
+        df = pd.read_sql(text(query), conn, params=params)
+
+    return df
+
+

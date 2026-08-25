@@ -33,6 +33,10 @@ from portfolio_core.db import (
     backfill_missing_fx_rates as db_backfill_missing_fx_rates,
     collect_and_store_dividend_cashflows_and_cash_account,
     calculate_and_store_daily_portfolio_values,
+    calculate_and_store_daily_benchmark_values,
+    generate_and_store_benchmark_transactions,
+    fetch_benchmarks_info,
+    fetch_benchmark_values_history,
     fetch_historical_prices_gbp,
     fetch_portfolio_positions_grid,
     find_missing_risk_dates,
@@ -369,6 +373,15 @@ def portfolio_daily_values(config: PortfolioValuesConfig, db: DatabaseResource):
         engine=engine
     )
     records_stored = res["records_stored"]
+
+    # Calculate shadow transactions and daily benchmark valuations
+    try:
+        bm_res = calculate_and_store_daily_benchmark_values(engine=engine)
+        bm_stored = bm_res.get("records_stored", 0)
+        logger.info(f"Calculated and stored {bm_stored} benchmark daily valuation records across active benchmarks.")
+    except Exception as e:
+        logger.warning(f"Failed to calculate benchmark daily values: {e}")
+        bm_stored = 0
     
     if records_stored == 0:
         return Output(value=0, metadata={"Status": "No records to calculate"})
@@ -383,7 +396,7 @@ def portfolio_daily_values(config: PortfolioValuesConfig, db: DatabaseResource):
     currency = res["currency"]
     
     logger.info(
-        f"Calculated and saved {records_stored} daily portfolio values. "
+        f"Calculated and saved {records_stored} daily portfolio values ({bm_stored} benchmark valuations). "
         f"Latest ({latest_date}): TOTAL=£{latest_tot:,.2f}, STOCKS=£{latest_stk:,.2f}, CASH=£{latest_csh:,.2f}"
     )
     
@@ -392,6 +405,7 @@ def portfolio_daily_values(config: PortfolioValuesConfig, db: DatabaseResource):
         metadata={
             "Status": "Daily portfolio values stored in remote MariaDB PORTFOLIO_VALUES table",
             "Records Stored": records_stored,
+            "Benchmark Valuations Stored": bm_stored,
             "Backfill Days": config.backfill_days,
             "Latest Valuation Date": latest_date,
             "Total Portfolio Value": f"£{latest_tot:,.2f} {currency}",

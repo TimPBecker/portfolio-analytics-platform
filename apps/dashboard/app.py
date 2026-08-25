@@ -21,6 +21,7 @@ from src.ui.tab_volatility import render_tab_volatility
 from src.ui.tab_var import render_tab_var
 from src.ui.tab_returns import render_tab_returns
 from src.ui.tab_portfolio import render_tab_portfolio
+from src.ui.tab_benchmarks import render_tab_benchmarks
 from src.ui.tab_transactions import render_tab_transactions
 
 
@@ -119,8 +120,9 @@ with col_h3:
 st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
 # Main Navigation Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "💼 Portfolio Holdings & Valuation",
+    "🎯 Benchmarking",
     "🛡️ Value-at-Risk Spectrum",
     "📊 Levels, Returns & Histogram",
     "📈 Rolling Volatility",
@@ -135,23 +137,29 @@ with tab1:
     )
 
 with tab2:
+    render_tab_benchmarks(
+        prices_gbp=prices_gbp,
+        asof_date=latest_date_str
+    )
+
+with tab3:
     render_tab_var(
         prices_gbp=prices_gbp,
         positions=positions,
         asof_date=latest_date_str
     )
 
-with tab3:
+with tab4:
     render_tab_returns(
         prices_gbp=prices_gbp,
         available_tickers=available_tickers
     )
 
-with tab4:
+with tab5:
     render_tab_volatility(
         prices_gbp=prices_gbp,
         available_tickers=available_tickers
     )
 
-with tab5:
+with tab6:
     render_tab_transactions()

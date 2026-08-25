@@ -8,7 +8,9 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-from portfolio_core.db import fetch_portfolio_values_history
+from portfolio_core.db import (
+    fetch_portfolio_values_history
+)
 from portfolio_core.analytics.statistics import compute_top_position_movers
 
 try:
@@ -241,27 +243,36 @@ def render_tab_portfolio(
         st.dataframe(pd.DataFrame(holdings_rows), use_container_width=True, hide_index=True)
 
     # -------------------------------------------------------------------------
-    # 4. Historical Portfolio Valuation Timeline (Stock Holdings Only)
+    # 4. Historical Portfolio Valuation Timeline
     # -------------------------------------------------------------------------
-    st.markdown("#### 📈 Historical Stock Holdings Valuation Timeline")
+    st.markdown("#### 📈 Portfolio Valuation Trajectory")
 
     if not pv_df.empty and len(pv_df) > 1:
-        stocks_series = pv_df["STOCKS"] if "STOCKS" in pv_df.columns else pv_df["TOTAL_VALUE"]
+        pv_df_sorted = pv_df.sort_values("DATE").reset_index(drop=True)
+        stocks_series = pv_df_sorted["STOCKS"] if "STOCKS" in pv_df_sorted.columns else pv_df_sorted["TOTAL_VALUE"]
+
         fig_pv = go.Figure()
+
         fig_pv.add_trace(
             go.Scatter(
-                x=pv_df["DATE"], y=stocks_series,
+                x=pv_df_sorted["DATE"],
+                y=stocks_series,
                 name="Stock Holdings Value (£)",
-                line=dict(color="#1E3A8A", width=2.5),
+                line=dict(color="#1E3A8A", width=3.0),
+                fill="tozeroy",
+                fillcolor="rgba(30, 58, 138, 0.08)",
                 hovertemplate="<b>%{x|%d %b %Y}</b><br>Stock Holdings Value: <b>£%{y:,.2f}</b><extra></extra>"
             )
         )
 
         layout_pv = get_plotly_layout_defaults()
         layout_pv.update(dict(
-            title=dict(text="Stock Holdings Value History (Last 12 Months)", font=dict(size=14, color="#0F172A")),
-            height=360
+            title=dict(text="Stock Holdings Valuation History (£)", font=dict(size=14, color="#0F172A")),
+            height=380,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         ))
         fig_pv.update_layout(**layout_pv)
-        fig_pv.update_yaxes(title_text="Stock Holdings Value (£)", tickprefix="£")
+        fig_pv.update_yaxes(title_text="Stock Value (£)", tickprefix="£")
         st.plotly_chart(fig_pv, use_container_width=True)
+    else:
+        st.info("No historical portfolio valuation data available.")
