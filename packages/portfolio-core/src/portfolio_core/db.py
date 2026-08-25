@@ -666,6 +666,17 @@ def fetch_and_store_ticker(ticker: str, shares: float = 0.0, history_days: int =
     cal_days = int(history_days * 1.5)
     target_start = (pd.Timestamp.now() - pd.Timedelta(days=cal_days)).strftime("%Y-%m-%d")
     
+    # Ensure target_start is at least as early as the earliest transaction in TRANSACTIONS
+    try:
+        with engine.connect() as conn:
+            min_tx = conn.execute(text("SELECT MIN(`TRANSACTION_DATE`) FROM `TRANSACTIONS`")).scalar()
+            if min_tx:
+                min_tx_str = (pd.to_datetime(min_tx) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+                if min_tx_str < target_start:
+                    target_start = min_tx_str
+    except Exception:
+        pass
+    
     existing_dates = set()
     latest_date = None
     min_date = None
@@ -1427,8 +1438,8 @@ def calculate_and_store_daily_portfolio_values(backfill_days: int = 0, engine=No
     holdings_long.rename(columns={"index": "DATE"}, inplace=True)
     holdings_long = holdings_long[holdings_long["SHARES"] != 0]
     
-    # Forward-fill price matrix across all calendar dates to guarantee 100% complete price coverage
-    price_grid = prices_merged.pivot_table(index="DATE", columns="TICKER", values="CLOSE_GBP").sort_index().ffill().reindex(full_date_range).ffill()
+    # Forward-fill & backward-fill price matrix across all calendar dates to guarantee 100% complete price coverage
+    price_grid = prices_merged.pivot_table(index="DATE", columns="TICKER", values="CLOSE_GBP").sort_index().ffill().bfill().reindex(full_date_range).ffill().bfill()
     prices_ffilled = price_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="CLOSE_GBP")
     prices_ffilled.rename(columns={"index": "DATE"}, inplace=True)
     prices_ffilled = prices_ffilled.dropna(subset=["CLOSE_GBP"])
@@ -2114,24 +2125,30 @@ def fetch_raw_asset_prices(
 
 
 def fetch_portfolio_values_history(
-    days: int = 365,
+    days: Optional[int] = None,
     asof_date: Optional[str] = None,
     engine: Optional[Engine] = None
 ) -> pd.DataFrame:
     """Fetches historical daily portfolio valuations from PORTFOLIO_VALUES."""
     eng = engine or get_engine()
-    params: Dict[str, Any] = {"limit": max(1, days)}
-    date_filter = ""
+    params: Dict[str, Any] = {}
+    where_clauses = []
     if asof_date:
-        date_filter = "WHERE `DATE` <= :asof"
-        params["asof"] = str(asof_date)
+        where_clauses.append("`DATE` <= :asof")
+        params["asof"] = str(asof_date)[:10]
+
+    where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    limit_str = ""
+    if days is not None and days > 0:
+        limit_str = "LIMIT :limit"
+        params["limit"] = int(days)
 
     query = f"""
         SELECT `DATE`, `TOTAL_VALUE`, `STOCKS`, `CASH`, `CURRENCY`
         FROM `PORTFOLIO_VALUES`
-        {date_filter}
+        {where_str}
         ORDER BY `DATE` DESC
-        LIMIT :limit
+        {limit_str}
     """
 
     with eng.connect() as conn:
