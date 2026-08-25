@@ -10,11 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Quarto CLI (includes Typst compiler)
+# Install Quarto CLI (includes Typst compiler) - multi-arch support for amd64 and arm64
 ARG QUARTO_VERSION=1.6.42
-RUN wget -q https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-amd64.deb \
-    && dpkg -i quarto-${QUARTO_VERSION}-linux-amd64.deb \
-    && rm quarto-${QUARTO_VERSION}-linux-amd64.deb
+RUN ARCH=$(dpkg --print-architecture) \
+    && wget -q https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${ARCH}.deb \
+    && dpkg -i quarto-${QUARTO_VERSION}-linux-${ARCH}.deb \
+    && rm quarto-${QUARTO_VERSION}-linux-${ARCH}.deb
 
 WORKDIR /app
 
