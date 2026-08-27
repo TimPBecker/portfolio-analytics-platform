@@ -18,6 +18,38 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 
+def get_dev_database_name(base_name: Optional[str]) -> str:
+    """
+    Returns the dev/test database name corresponding to a base database name.
+    If the name already ends with '_dev', it is returned unchanged.
+    E.g. 'stocks' -> 'stocks_dev', 'stocks_dev' -> 'stocks_dev'.
+    """
+    if not base_name:
+        return "stocks_dev"
+    clean_name = str(base_name).strip()
+    if clean_name.endswith("_dev"):
+        return clean_name
+    return f"{clean_name}_dev"
+
+
+def is_test_environment(is_test: Optional[bool] = None) -> bool:
+    """
+    Determines whether the current execution context is in test mode.
+    Checks explicit parameter, environment variables (PORTFOLIO_ENV=test, TEST_MODE=1),
+    or active pytest test runner session (PYTEST_CURRENT_TEST).
+    """
+    if is_test is not None:
+        return bool(is_test)
+    env_mode = os.getenv("PORTFOLIO_ENV", "").lower()
+    if env_mode in ("test", "testing"):
+        return True
+    if os.getenv("TEST_MODE") == "1":
+        return True
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    return False
+
+
 def get_connection_string(
     db_type: Optional[str] = None,
     user: Optional[str] = None,
@@ -26,27 +58,39 @@ def get_connection_string(
     port: Optional[int] = None,
     database: Optional[str] = None,
     sqlite_path: Optional[str] = None,
-    config_path: Optional[str] = None
+    config_path: Optional[str] = None,
+    is_test: Optional[bool] = None,
 ) -> str:
     """
     Constructs a database connection string with safe URL-encoding of credentials.
     Supports both 'mariadb' / 'mysql' and 'sqlite' (must end in .s3db).
     All non-secret parameters are loaded from config.yaml without hardcoded code defaults.
     The secret password is read from the DB_PASSWORD environment variable for MariaDB.
+    When running in test mode (is_test=True, PORTFOLIO_ENV=test, TEST_MODE=1, or active pytest),
+    it strictly targets the dev database ('<database_name>_dev', e.g. 'stocks_dev') or an on-demand SQLite test db.
     """
     from portfolio_core.config import get_db_config, load_config
+    in_test = is_test_environment(is_test)
     loaded_cfg = load_config(config_path) if config_path else {}
-    db_cfg = get_db_config(loaded_cfg) if loaded_cfg else get_db_config()
+    db_cfg = get_db_config(loaded_cfg, is_test=in_test) if loaded_cfg else get_db_config(is_test=in_test)
 
     t = (db_type or db_cfg.get("type") or "mariadb").lower()
 
     if t == "sqlite":
         sp = sqlite_path or db_cfg.get("sqlite_path")
+        if in_test:
+            if not sp:
+                sp = ":memory:"
+            elif sp != ":memory:" and not sp.endswith("_dev.s3db"):
+                base = sp[:-5] if sp.endswith(".s3db") else sp
+                sp = f"{base}_dev.s3db"
         if not sp:
             raise ValueError(
                 "Database configuration error: Missing 'sqlite_path' for SQLite database. "
                 "Please specify sqlite_path in config.yaml."
             )
+        if sp == ":memory:":
+            return "sqlite:///:memory:"
         if not sp.endswith(".s3db"):
             raise ValueError(
                 f"Database configuration error: SQLite database file path must end with '.s3db' (got '{sp}'). "
@@ -65,6 +109,9 @@ def get_connection_string(
     prt = port or (int(os.getenv("DB_PORT")) if os.getenv("DB_PORT") else None) or db_cfg.get("port")
     db = database or os.getenv("DB_NAME") or db_cfg.get("database")
 
+    if in_test and db:
+        db = get_dev_database_name(db)
+
     missing = []
     if not u: missing.append("user")
     if not h: missing.append("host")
@@ -81,11 +128,92 @@ def get_connection_string(
     return f"mysql+pymysql://{u}:{quote_plus(str(p))}@{h}:{int(prt)}/{db}"
 
 
-def get_engine(connection_string=None):
-    """Returns a SQLAlchemy engine."""
+def get_engine(connection_string=None, is_test: Optional[bool] = None) -> Engine:
+    """Returns a SQLAlchemy engine. Automatically resolves to dev database when in test mode."""
     if hasattr(connection_string, "connect"):
         return connection_string
-    return create_engine(connection_string or get_connection_string())
+    return create_engine(connection_string or get_connection_string(is_test=is_test))
+
+
+def create_test_sqlite_engine(
+    sqlite_path: Optional[str] = ":memory:",
+    initialize_schema: bool = True
+) -> Engine:
+    """
+    Generates an on-demand isolated test SQLite database (in-memory or on-disk .s3db/.s2db)
+    and initializes all database tables.
+    """
+    if sqlite_path == ":memory:" or sqlite_path is None:
+        engine = create_engine("sqlite:///:memory:")
+    else:
+        path_str = str(sqlite_path)
+        if not path_str.endswith(".s3db") and not path_str.endswith(".s2db"):
+            path_str = f"{path_str}.s3db"
+        engine = create_engine(f"sqlite:///{path_str}")
+    
+    if initialize_schema:
+        create_all_tables(engine)
+    return engine
+
+
+def cleanup_test_sqlite_files(base_dirs: Optional[List[str]] = None) -> List[str]:
+    """
+    Safely finds and deletes any on-disk test SQLite database files (.s3db, .s2db, *_dev.s3db, test_*.s3db)
+    generated during test executions to prevent leftover artifacts on disk.
+    """
+    from pathlib import Path
+    import glob
+    
+    dirs = [Path(d).resolve() for d in base_dirs] if base_dirs else [Path.cwd().resolve()]
+    deleted = []
+    
+    patterns = ["*.s3db", "*.s2db", "*_dev.s3db", "*_dev.s2db", "test_*.s3db", "test_*.s2db", "*_test.s3db"]
+    
+    for d in dirs:
+        for p in patterns:
+            for fpath in d.glob(f"**/{p}"):
+                # Never delete production configs or non-test files if any
+                if fpath.is_file() and ("test" in fpath.name.lower() or "dev" in fpath.name.lower() or fpath.name.endswith(".s2db")):
+                    try:
+                        fpath.unlink(missing_ok=True)
+                        deleted.append(str(fpath))
+                    except Exception:
+                        pass
+    return deleted
+
+
+def get_test_engine(
+    db_type: Optional[str] = None,
+    initialize_schema: bool = True,
+    fallback_to_sqlite: bool = True,
+    **kwargs
+) -> Engine:
+    """
+    Returns a SQLAlchemy Engine strictly configured for testing (dev database).
+    - If db_type is 'sqlite': creates an on-demand SQLite engine with schema initialized.
+    - If db_type is 'mariadb' or defaults to MariaDB: connects strictly to '<database>_dev' (e.g. stocks_dev).
+      If MariaDB is unreachable and fallback_to_sqlite is True, transparently provides an on-demand SQLite test engine.
+    """
+    from portfolio_core.config import get_db_config
+    db_cfg = get_db_config(is_test=True)
+    t = (db_type or db_cfg.get("type") or "mariadb").lower()
+
+    if t == "sqlite":
+        sp = kwargs.get("sqlite_path", ":memory:")
+        return create_test_sqlite_engine(sqlite_path=sp, initialize_schema=initialize_schema)
+
+    try:
+        conn_str = get_connection_string(db_type="mariadb", is_test=True, **kwargs)
+        engine = create_engine(conn_str)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        if initialize_schema:
+            create_all_tables(engine)
+        return engine
+    except Exception as e:
+        if fallback_to_sqlite:
+            return create_test_sqlite_engine(sqlite_path=":memory:", initialize_schema=initialize_schema)
+        raise e
 
 
 def test_db_connection(engine: Optional[Engine] = None) -> Tuple[bool, str]:

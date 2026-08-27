@@ -32,6 +32,7 @@ env/
 .env.local
 .env.*.local
 *.s3db
+*.s2db
 
 # Testing and coverage
 .pytest_cache/
