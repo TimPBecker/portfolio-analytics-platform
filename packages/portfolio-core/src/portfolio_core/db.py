@@ -255,7 +255,8 @@ def create_all_tables(engine=None):
                 `PRICE_GBP` REAL NOT NULL,
                 `GBP_VALUE` REAL NOT NULL,
                 `WEIGHT` REAL NOT NULL DEFAULT 1.0,
-                `CREATED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                `CREATED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             );
             """,
             """
@@ -269,7 +270,8 @@ def create_all_tables(engine=None):
                 `STOCKS` REAL NOT NULL DEFAULT 0.0,
                 `CASH` REAL NOT NULL DEFAULT 0.0,
                 `CURRENCY` TEXT NOT NULL DEFAULT 'GBP',
-                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`)
+                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`),
+                FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             );
             """
         ]
@@ -422,7 +424,8 @@ def create_all_tables(engine=None):
                 `GBP_VALUE` DECIMAL(15, 2) NOT NULL,
                 `WEIGHT` DECIMAL(6, 4) NOT NULL DEFAULT 1.0000,
                 `CREATED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX `idx_bm_tx_code_date` (`BENCHMARK_CODE`, `TRANSACTION_DATE`)
+                INDEX `idx_bm_tx_code_date` (`BENCHMARK_CODE`, `TRANSACTION_DATE`),
+                CONSTRAINT `fk_bm_tx_code` FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """,
             """
@@ -433,7 +436,8 @@ def create_all_tables(engine=None):
                 `STOCKS` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Market value of benchmark constituent shares in GBP',
                 `CASH` DECIMAL(15, 2) NOT NULL DEFAULT 0.00 COMMENT 'Cash account balance in GBP from cumulative benchmark dividends',
                 `CURRENCY` VARCHAR(3) NOT NULL DEFAULT 'GBP',
-                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`)
+                PRIMARY KEY (`DATE`, `BENCHMARK_CODE`),
+                CONSTRAINT `fk_bm_val_code` FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
         ]
@@ -2609,13 +2613,13 @@ def add_benchmark(
 
 def delete_benchmark(benchmark_code: str, engine: Optional[Engine] = None) -> bool:
     """
-    Removes a benchmark along with its generated shadow transactions and historical values.
+    Removes a benchmark from the BENCHMARKS table.
+    Dependent tables (BENCHMARK_TRANSACTIONS, BENCHMARK_VALUES) are updated automatically
+    through database foreign key constraints.
     """
     eng = engine or get_engine()
     code_clean = str(benchmark_code).strip().upper()
     with eng.connect() as conn:
-        conn.execute(text("DELETE FROM `BENCHMARK_VALUES` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
-        conn.execute(text("DELETE FROM `BENCHMARK_TRANSACTIONS` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
         conn.execute(text("DELETE FROM `BENCHMARKS` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
         conn.commit()
     return True

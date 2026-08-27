@@ -444,7 +444,7 @@ def render_tab_benchmarks(
     # 3. Benchmark Assets & Linear Combination Management
     # -------------------------------------------------------------------------
     st.markdown("### ⚙️ Benchmark Asset & Blend Management")
-    st.caption("Register new single-ticker benchmarks or weighted linear combinations. If name is left blank, it automatically falls back to .")
+    st.caption("Register new single-ticker benchmarks or weighted linear combinations, or remove existing benchmarks from the database.")
 
     col_bm_form, col_bm_table = st.columns([1.1, 1.2])
 
@@ -504,29 +504,37 @@ def render_tab_benchmarks(
 
     with col_bm_table:
         with st.container(border=True):
-            st.markdown("##### 📋 Registered Benchmarks ( Table)")
+            st.markdown("##### 📋 Registered Benchmarks (BENCHMARKS Table)")
             bm_df = fetch_benchmarks_info(engine=engine)
             if not bm_df.empty:
                 display_cols = [c for c in ["BENCHMARK_CODE", "NAME", "CONSTITUENTS_DISPLAY", "DESCRIPTION"] if c in bm_df.columns]
                 st.dataframe(bm_df[display_cols], use_container_width=True, hide_index=True)
 
-                # Delete benchmark control
+                st.markdown("---")
+                st.markdown("##### 🗑️ Remove Benchmark")
                 bm_to_del = st.selectbox(
                     "Select Benchmark to Remove:",
                     options=bm_df["BENCHMARK_CODE"].tolist(),
                     index=None,
-                    placeholder="Select a benchmark to remove..."
+                    format_func=lambda b: f"{b} — {bm_name_map.get(b, b)}",
+                    placeholder="Select a benchmark to remove from database..."
                 )
-                if bm_to_del and st.button(f"🗑️ Delete Benchmark {bm_to_del}", type="secondary"):
-                    delete_benchmark(bm_to_del, engine=engine)
-                    st.success(f"Deleted benchmark {bm_to_del}.")
-                    st.cache_data.clear()
-                    st.rerun()
+                if bm_to_del:
+                    del_name = bm_name_map.get(bm_to_del, bm_to_del)
+                    st.caption(f"Selected: **{bm_to_del}** ({del_name})")
+                    if st.button(f"🗑️ Delete Benchmark '{bm_to_del}'", type="secondary", use_container_width=True):
+                        try:
+                            delete_benchmark(bm_to_del, engine=engine)
+                            st.success(f"✅ Deleted benchmark **{bm_to_del}** from the database.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Failed to delete benchmark: {ex}")
             else:
                 st.info("No benchmark tickers registered.")
 
     # Expander for Benchmark Shadow Transactions Inspection
-    with st.expander("🔍 View Benchmark Shadow Transactions ( Table)"):
+    with st.expander("🔍 View Benchmark Shadow Transactions (BENCHMARK_TRANSACTIONS Table)"):
         bm_tx_all = fetch_benchmark_transactions(engine=engine)
         if not bm_tx_all.empty:
             st.caption("Each row represents a shadow trade created with equivalent GBP invested value and constituent weight on the original transaction date.")

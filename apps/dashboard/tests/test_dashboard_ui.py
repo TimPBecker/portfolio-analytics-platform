@@ -235,6 +235,12 @@ def test_benchmark_tables_and_shadow_calculations():
     assert float(day2_div_row["STOCKS"]) == 1100.0
     assert float(day2_div_row["TOTAL_VALUE"]) == 1130.0
 
+    # 8. Delete benchmark from BENCHMARKS table and verify removal
+    del_res = delete_benchmark(benchmark_code="CSP1.L_70_VUKE.L_30", engine=engine)
+    assert del_res is True
+    bm_info_after_del = fetch_benchmarks_info(engine=engine)
+    assert "CSP1.L_70_VUKE.L_30" not in bm_info_after_del["BENCHMARK_CODE"].values
+
 
 def test_quarto_report_template_discovery():
     try:
