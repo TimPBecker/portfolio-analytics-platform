@@ -726,7 +726,7 @@ portfolio_job = define_asset_job(
 daily_portfolio_schedule = ScheduleDefinition(
     name="daily_portfolio_schedule",
     job=portfolio_job,
-    cron_schedule="0 23 * * 1-5",
+    cron_schedule="30 21 * * 1-5",
     execution_timezone="Europe/London",
 )
 
