@@ -17,9 +17,9 @@ RUN ARCH=$(dpkg --print-architecture) \
     && dpkg -i quarto-${QUARTO_VERSION}-linux-${ARCH}.deb \
     && rm quarto-${QUARTO_VERSION}-linux-${ARCH}.deb
 
-# Disable any telemetry in Quarto and Streamlit
+# Disable any telemetry in Quarto
 ENV QUARTO_DENY_TELEMETRY=1 \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
@@ -35,12 +35,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY reports /reports
 COPY apps/dashboard /app
 
-# Expose Streamlit default port
+# Expose dashboard default port
 EXPOSE 8501
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8501/_stcore/health || exit 1
+  CMD curl -f http://localhost:8501/ || exit 1
 
-# Launch Streamlit app
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Launch Shiny app
+CMD ["shiny", "run", "app.py", "--host", "0.0.0.0", "--port", "8501"]

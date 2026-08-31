@@ -27,7 +27,7 @@ analytics:
   ewma_decay_factor: 0.94            # RiskMetrics EWMA lambda parameter
   annualization_factor: 252          # Trading days per year
 
-# 3. Streamlit UI Settings
+# 3. Shiny UI Settings
 ui:
   app_title: "Portfolio Risk & Volatility Analytics"
   app_icon: "📈"

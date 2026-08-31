@@ -12,6 +12,7 @@ import pandas as pd
 from portfolio_core.db import (
     get_dev_database_name,
     is_test_environment,
+    get_latest_allowed_market_date,
     get_connection_string,
     get_engine,
     create_test_sqlite_engine,
@@ -23,6 +24,29 @@ from portfolio_core.db import (
     calculate_and_store_daily_benchmark_values,
 )
 from portfolio_core.config import get_db_config
+
+
+def test_get_latest_allowed_market_date():
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+
+    london_tz = ZoneInfo("Europe/London")
+    # Test morning before 10pm London time (10:00 AM on 2026-08-27)
+    morning_dt = datetime(2026, 8, 27, 10, 0, 0, tzinfo=london_tz)
+    assert get_latest_allowed_market_date(morning_dt) == "2026-08-26"
+
+    # Test afternoon before 10pm London time (21:59:59 on 2026-08-27)
+    pre_cutoff_dt = datetime(2026, 8, 27, 21, 59, 59, tzinfo=london_tz)
+    assert get_latest_allowed_market_date(pre_cutoff_dt) == "2026-08-26"
+
+    # Test at exactly 10:00 PM London time (22:00:00 on 2026-08-27)
+    at_cutoff_dt = datetime(2026, 8, 27, 22, 0, 0, tzinfo=london_tz)
+    assert get_latest_allowed_market_date(at_cutoff_dt) == "2026-08-27"
+
+    # Test after 10:00 PM London time (23:30:00 on 2026-08-27)
+    post_cutoff_dt = datetime(2026, 8, 27, 23, 30, 0, tzinfo=london_tz)
+    assert get_latest_allowed_market_date(post_cutoff_dt) == "2026-08-27"
+
 
 
 def test_get_dev_database_name():

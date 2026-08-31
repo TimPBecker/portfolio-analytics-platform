@@ -1,5 +1,5 @@
 """
-Integration tests for Streamlit dashboard UI components and portfolio_core wiring.
+Integration tests for Shiny dashboard UI components and portfolio_core wiring.
 """
 
 import pytest
@@ -11,14 +11,61 @@ from portfolio_core.analytics.volatility import calculate_ewma_volatility, calcu
 from portfolio_core.analytics.var import compute_multi_model_var_spectrum, compute_shapley_risk_contributions
 from portfolio_core.analytics.statistics import compute_distribution_metrics
 try:
-    from src.ui.theme import get_plotly_layout_defaults, PALETTE
-    from src.ui.tab_portfolio import render_tab_portfolio
-    from src.ui.tab_benchmarks import render_tab_benchmarks
+    from src.ui.theme import get_plotly_layout_defaults, PALETTE, render_metric_card, custom_css_header
+    from src.ui.tab_portfolio import tab_portfolio_ui, tab_portfolio_server
+    from src.ui.tab_benchmarks import tab_benchmarks_ui, tab_benchmarks_server
+    from src.ui.tab_var import tab_var_ui, tab_var_server
+    from src.ui.tab_returns import tab_returns_ui, tab_returns_server
+    from src.ui.tab_volatility import tab_volatility_ui, tab_volatility_server
+    from src.ui.tab_transactions import tab_transactions_ui, tab_transactions_server
 except ImportError:
-    from apps.dashboard.src.ui.theme import get_plotly_layout_defaults, PALETTE
-    from apps.dashboard.src.ui.tab_portfolio import render_tab_portfolio
-    from apps.dashboard.src.ui.tab_benchmarks import render_tab_benchmarks
+    from apps.dashboard.src.ui.theme import get_plotly_layout_defaults, PALETTE, render_metric_card, custom_css_header
+    from apps.dashboard.src.ui.tab_portfolio import tab_portfolio_ui, tab_portfolio_server
+    from apps.dashboard.src.ui.tab_benchmarks import tab_benchmarks_ui, tab_benchmarks_server
+    from apps.dashboard.src.ui.tab_var import tab_var_ui, tab_var_server
+    from apps.dashboard.src.ui.tab_returns import tab_returns_ui, tab_returns_server
+    from apps.dashboard.src.ui.tab_volatility import tab_volatility_ui, tab_volatility_server
+    from apps.dashboard.src.ui.tab_transactions import tab_transactions_ui, tab_transactions_server
 from portfolio_core.analytics.statistics import compute_top_position_movers
+
+
+def test_shiny_app_and_modules_structure():
+    assert tab_portfolio_ui("p") is not None
+    assert tab_benchmarks_ui("b") is not None
+    assert tab_var_ui("v") is not None
+    assert tab_returns_ui("r") is not None
+    assert tab_volatility_ui("vol") is not None
+    assert tab_transactions_ui("t") is not None
+
+
+def test_tab_volatility_and_returns_analytics():
+    dates = pd.date_range("2026-01-01", periods=100, freq="B")
+    prices = pd.Series(100.0 * np.cumprod(1.0 + np.random.normal(0, 0.01, 100)), index=dates)
+    rets = np.log(prices / prices.shift(1)).dropna()
+
+    # EWMA & Rolling Volatility
+    ewma_vol = calculate_ewma_volatility(rets, decay_factor=0.94, annualize=True)
+    assert not ewma_vol.empty
+    rolling_vol = calculate_sample_volatility(rets, window=60, annualize=True)
+    assert not rolling_vol.empty
+
+    # Distribution metrics for returns tab
+    metrics = compute_distribution_metrics(rets)
+    assert "count" in metrics
+    assert "mean_daily_pct" in metrics
+    assert "vol_annualized_pct" in metrics
+    assert "skewness" in metrics
+
+
+
+def test_theme_metric_card_render():
+
+    card_html = render_metric_card("Test Label", "£1,000.00", "+5.00%", "positive")
+    assert "metric-card" in card_html
+    assert "Test Label" in card_html
+    assert "£1,000.00" in card_html
+    assert "delta-positive" in card_html
+
 
 
 def test_theme_layout_defaults():

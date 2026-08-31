@@ -8,7 +8,8 @@ import os
 import re
 import json
 from urllib.parse import quote_plus
-from datetime import date
+from datetime import date, datetime, time as dt_time
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict, Tuple, Any, Union
 import pandas as pd
 import numpy as np
@@ -16,6 +17,24 @@ import yfinance as yf
 import time
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+
+
+def get_latest_allowed_market_date(current_time: Optional[datetime] = None) -> str:
+    """
+    Returns the latest date string (YYYY-MM-DD) for which market data can be queried,
+    ingested, or included in portfolio analytics.
+    
+    Market data for the current date is strictly prohibited before 10:00 PM (22:00) London time.
+    - Before 22:00 London time: latest allowed market date is yesterday (or latest prior market day).
+    - At or after 22:00 London time: latest allowed market date is today.
+    """
+    london_tz = ZoneInfo("Europe/London")
+    now_london = current_time.astimezone(london_tz) if current_time else datetime.now(london_tz)
+    if now_london.time() < dt_time(22, 0, 0):
+        allowed_dt = now_london.date() - pd.Timedelta(days=1)
+    else:
+        allowed_dt = now_london.date()
+    return allowed_dt.strftime("%Y-%m-%d")
 
 
 def get_dev_database_name(base_name: Optional[str]) -> str:
@@ -48,6 +67,7 @@ def is_test_environment(is_test: Optional[bool] = None) -> bool:
     if "PYTEST_CURRENT_TEST" in os.environ:
         return True
     return False
+
 
 
 def get_connection_string(
@@ -883,11 +903,18 @@ def fetch_and_store_ticker(ticker: str, shares: float = 0.0, history_days: int =
         hist["TICKER"] = ticker
         hist["CURRENCY"] = currency
         
+        # 10:00 PM London cutoff: Never store market data for current date before 22:00 London time
+        max_allowed_date = get_latest_allowed_market_date()
+        hist = hist[hist["DATE"] <= max_allowed_date]
+        if hist.empty:
+            return None
+
         # Filter out rows that already exist in ASSET_PRICES
         if existing_dates:
             new_rows = hist[~hist["DATE"].isin(existing_dates)].copy()
         else:
             new_rows = hist.copy()
+
 
         target_columns = [
             "DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME",
@@ -1108,6 +1135,13 @@ def fetch_and_store_fx_rate(from_curr: str, to_curr: str = "GBP", connection_str
         hist["TO_CURRENCY"] = to_curr_clean
         hist["RATE"] = hist["CLOSE"]
         hist["COMMENT"] = None
+        
+        # 10:00 PM London cutoff: Never store FX data for current date before 22:00 London time
+        max_allowed_date = get_latest_allowed_market_date()
+        hist = hist[hist["DATE"] <= max_allowed_date]
+        if hist.empty:
+            return 0
+
         
         records = [
             {
@@ -2185,9 +2219,15 @@ def fetch_historical_prices_gbp(
     merged.loc[(merged["CURRENCY"].isin(["GBP", "gbp"])) & merged["RATE"].isna(), "RATE"] = 1.0
     merged["CLOSE_GBP"] = merged["CLOSE"].astype(float) * merged["RATE"].astype(float)
 
+    max_allowed_date = get_latest_allowed_market_date()
     if asof_date:
         asof_str = pd.to_datetime(asof_date).strftime("%Y-%m-%d")
-        merged = merged[merged["DATE"] <= asof_str]
+        effective_asof = min(asof_str, max_allowed_date)
+    else:
+        effective_asof = max_allowed_date
+
+    merged = merged[merged["DATE"] <= effective_asof]
+
 
     price_matrix = merged.pivot_table(
         index="DATE",
@@ -2571,7 +2611,9 @@ def query_yahoo_close_price(
     if not clean_ticker:
         return {"status": "error", "message": "No ticker provided"}
 
-    dt = pd.to_datetime(target_date)
+    max_allowed_date = get_latest_allowed_market_date()
+    target_date_str = min(str(target_date)[:10], max_allowed_date)
+    dt = pd.to_datetime(target_date_str)
     start_dt = (dt - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     end_dt = (dt + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
 
@@ -2601,12 +2643,18 @@ def query_yahoo_close_price(
     hist_date_col = "Date" if "Date" in hist.columns else ("DATE" if "DATE" in hist.columns else hist.columns[0])
     hist["Date_str"] = pd.to_datetime(hist[hist_date_col]).dt.strftime("%Y-%m-%d")
 
-    target_date_str = str(target_date)[:10]
-    valid_rows = hist[hist["Date_str"] <= target_date_str]
+    # Filter strictly to dates on or before target_date and allowed by 10pm London cutoff
+    valid_rows = hist[(hist["Date_str"] <= target_date_str) & (hist["Date_str"] <= max_allowed_date)]
     if not valid_rows.empty:
         selected_row = valid_rows.iloc[-1]
     else:
-        selected_row = hist.iloc[0]
+        # Fallback to latest valid row within cutoff
+        prior_rows = hist[hist["Date_str"] <= max_allowed_date]
+        if not prior_rows.empty:
+            selected_row = prior_rows.iloc[-1]
+        else:
+            selected_row = hist.iloc[0]
+
 
     close_col = "Close" if "Close" in hist.columns else "CLOSE"
     close_price = float(selected_row[close_col])

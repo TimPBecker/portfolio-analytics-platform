@@ -1,13 +1,13 @@
 """
-Tab 5: Transaction Management & Trade Entry View.
+Tab 6: Transaction Management & Trade Entry View (Shiny Module).
 Allows recording new buy/sell transactions with automatic ID incrementation
 and live Yahoo Finance closing price lookup.
 """
 
 from datetime import date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 import pandas as pd
-import streamlit as st
+from shiny import module, ui, render, reactive
 
 from portfolio_core.db import (
     get_engine,
@@ -19,222 +19,318 @@ from portfolio_core.db import (
     fetch_and_store_ticker,
     fetch_and_store_fx_rate,
     calculate_and_store_daily_portfolio_values,
-    calculate_and_store_daily_benchmark_values
+    calculate_and_store_daily_benchmark_values,
+    get_latest_allowed_market_date
 )
-
 try:
-    from src.ui.theme import PALETTE, get_plotly_layout_defaults
+    from src.ui.theme import PALETTE, render_metric_card
 except ImportError:
-    from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
+    from apps.dashboard.src.ui.theme import PALETTE, render_metric_card
 
 
-def render_tab_transactions():
-    """Renders the Transaction Management and Trade Entry interface."""
-    st.markdown("### 📝 Record Portfolio Transactions")
-    st.caption("Enter new stock trade transactions into the database with real-time Yahoo Finance price lookup and automatic ID incrementation.")
 
-    engine = get_engine()
-
-    # -------------------------------------------------------------------------
-    # 1. Transaction Entry Form & Yahoo Price Preview
-    # -------------------------------------------------------------------------
-    next_id = get_next_transaction_id(engine=engine)
-
-    col_form, col_preview = st.columns([1.1, 1.0])
-
-    with col_form:
-        st.markdown("#### ➕ New Trade Entry")
-
-        st.text_input(
-            "Transaction ID (Auto-Incremented):",
-            value=f"#{next_id}",
-            disabled=True,
-            help="The ID is automatically incremented from the highest existing ID in the database."
-        )
-
-        col_t1, col_t2 = st.columns([1.2, 1.0])
-        with col_t1:
-            ticker_input = st.text_input(
-                "Ticker Symbol:",
-                value="NVDA",
-                placeholder="e.g. NVDA, STAN.L, AAPL, MSFT",
-                help="Enter standard Yahoo Finance ticker symbol (e.g., NVDA for US stocks, STAN.L for London stocks)."
-            ).strip().upper()
-        with col_t2:
-            tx_date = st.date_input(
-                "Transaction Date:",
-                value=date.today(),
-                max_value=date.today(),
-                help="Date on which the transaction occurred."
+@module.ui
+def tab_transactions_ui():
+    """UI layout for Transaction Management and Trade Entry."""
+    return ui.TagList(
+        ui.tags.div(
+            ui.tags.h3("📝 Record Portfolio Transactions", style="margin-bottom: 4px;"),
+            ui.tags.p(
+                "Enter new stock trade transactions into the database with real-time Yahoo Finance price lookup and automatic ID incrementation.",
+                class_="text-muted",
+                style="margin-bottom: 1.2rem;"
             )
+        ),
 
-        col_q1, col_q2 = st.columns([1.2, 1.0])
-        with col_q1:
-            qty_input = st.number_input(
-                "Quantity / Shares:",
-                min_value=0.0001,
-                value=10.0,
-                step=1.0,
-                format="%.4f",
-                help="Number of shares bought or sold."
-            )
-        with col_q2:
-            action = st.radio(
-                "Action:",
-                options=["BUY (Add Shares)", "SELL (Reduce Shares)"],
-                horizontal=False,
-                help="BUY adds positive quantity; SELL deducts shares."
-            )
+        # 1. Trade Entry Form & Quote Preview
+        ui.row(
+            # Column 1: Trade Form
+            ui.column(
+                6,
+                ui.tags.div(
+                    ui.tags.h4("➕ New Trade Entry", style="margin-bottom: 12px;"),
+                    ui.output_ui("next_id_ui"),
+                    ui.row(
+                        ui.column(6, ui.input_text("ticker_input", "Ticker Symbol:", value="NVDA", placeholder="e.g. NVDA, STAN.L")),
+                        ui.column(6, ui.input_date("tx_date", "Transaction Date:", value=get_latest_allowed_market_date()))
+                    ),
 
-        sync_prices = st.checkbox(
-            "Sync latest historical prices for this ticker into ASSET_PRICES",
-            value=True,
-            help="Automatically fetches and backfills price history from Yahoo Finance for this asset."
-        )
-
-        submit_btn = st.button("💾 Record Transaction", type="primary", use_container_width=True)
-
-    with col_preview:
-        st.markdown("#### 🔍 Yahoo Finance Market Quote & FX Translation")
-        if ticker_input:
-            with st.spinner(f"Querying Yahoo Finance for {ticker_input} on {tx_date}..."):
-                quote_info = query_yahoo_close_price(ticker=ticker_input, target_date=tx_date, engine=engine)
-
-            if quote_info.get("status") == "success":
-                px = float(quote_info["close_price"])
-                curr = str(quote_info.get("currency", "USD"))
-                found_dt = str(quote_info["found_date"])
-                is_exact = bool(quote_info["is_exact_date"])
-                fx_rate = float(quote_info.get("fx_rate_to_gbp", 1.0))
-                fx_desc = str(quote_info.get("fx_description", ""))
-                px_gbp = float(quote_info.get("close_price_gbp", px * fx_rate))
-
-                total_val_orig = px * qty_input
-                total_val_gbp = px_gbp * qty_input
-
-                curr_sym = "£" if curr == "GBP" else ("p" if curr in ["GBp", "GBX"] else ("$" if curr == "USD" else ("€" if curr == "EUR" else f"{curr} ")))
-                orig_quote_str = f"{px:,.2f} {curr}" if curr in ["GBp", "GBX"] else f"{curr_sym}{px:,.2f} {curr}"
-                orig_val_str = f"{total_val_orig:,.2f} {curr}" if curr in ["GBp", "GBX"] else f"{curr_sym}{total_val_orig:,.2f} {curr}"
-
-                with st.container(border=True):
-                    # Top Metrics: Translated GBP Price & Original Quote
-                    col_p1, col_p2 = st.columns(2)
-                    with col_p1:
-                        st.metric(
-                            label=f"Price in GBP ({ticker_input})",
-                            value=f"£{px_gbp:,.2f} GBP"
-                        )
-                    with col_p2:
-                        st.metric(
-                            label=f"Original Quote ({curr})",
-                            value=orig_quote_str
-                        )
-
-                    # FX Rate Conversion Banner
-                    if curr != "GBP":
-                        st.info(f"💱 **FX Rate:** 1 {curr} = **£{fx_rate:,.4f} GBP**  \n*{fx_desc}*")
-                    else:
-                        st.success("💱 **Currency:** Native GBP (FX Rate: 1.00)")
-
-                    # Trading Date Match Info
-                    date_badge = "🟢 Exact Market Date Match" if is_exact else "🟡 Nearest Prior Market Day"
-                    st.caption(f"📅 **Trading Date Found:** `{found_dt}` ({date_badge})")
-
-                    st.divider()
-
-                    # Estimated Total Trade Value
-                    col_v1, col_v2 = st.columns(2)
-                    with col_v1:
-                        st.metric(
-                            label="Est. Total Value (GBP)",
-                            value=f"£{total_val_gbp:,.2f} GBP",
-                            help=f"{qty_input:,.4f} shares @ £{px_gbp:,.2f} GBP"
-                        )
-                    with col_v2:
-                        if curr != "GBP":
-                            st.metric(
-                                label=f"Est. Value ({curr})",
-                                value=orig_val_str,
-                                help=f"{qty_input:,.4f} shares @ {orig_quote_str}"
-                            )
-                        else:
-                            st.metric(
-                                label="Order Size",
-                                value=f"{qty_input:,.4f} shares"
-                            )
-            else:
-                st.warning(quote_info.get("message", f"Could not retrieve price for {ticker_input}."))
-        else:
-            st.info("Enter a ticker symbol to look up its market closing price and GBP translated quote.")
-
-    # Handle submission
-    if submit_btn:
-        if not ticker_input:
-            st.error("Please enter a valid ticker symbol.")
-        else:
-            signed_qty = qty_input if "BUY" in action else -abs(qty_input)
-            try:
-                rec_res = record_transaction(
-                    ticker=ticker_input,
-                    transaction_date=tx_date,
-                    quantity=signed_qty,
-                    transaction_id=next_id,
-                    engine=engine
+                    ui.row(
+                        ui.column(6, ui.input_numeric("qty_input", "Quantity / Shares:", value=10.0, min=0.0001, step=1.0)),
+                        ui.column(6, ui.input_radio_buttons("action", "Action:", {"BUY": "BUY (Add Shares)", "SELL": "SELL (Reduce Shares)"}, selected="BUY"))
+                    ),
+                    ui.input_checkbox("sync_prices", "Sync latest historical prices for this ticker into ASSET_PRICES", value=True),
+                    ui.tags.div(style="margin-top: 10px;"),
+                    ui.input_action_button("submit_btn", "💾 Record Transaction", class_="btn-primary w-100"),
+                    ui.tags.div(style="margin-top: 10px;"),
+                    ui.output_ui("tx_submit_result_ui"),
+                    class_="metric-card",
+                    style="margin-bottom: 1.5rem;"
                 )
+            ),
+            # Column 2: Yahoo Live Price Preview
+            ui.column(
+                6,
+                ui.tags.div(
+                    ui.tags.h4("🔍 Yahoo Finance Market Quote & FX Translation", style="margin-bottom: 12px;"),
+                    ui.output_ui("yahoo_preview_ui"),
+                    class_="metric-card",
+                    style="margin-bottom: 1.5rem;"
+                )
+            )
+        ),
 
-                if sync_prices:
-                    try:
-                        fetch_and_store_ticker(ticker=ticker_input, engine=engine)
-                        fetch_and_store_fx_rate(from_curr="USD", engine=engine)
-                        calculate_and_store_daily_portfolio_values(backfill_days=30, engine=engine)
-                        calculate_and_store_daily_benchmark_values(engine=engine)
-                    except Exception as e:
-                        st.caption(f"Price sync note: {e}")
+        ui.tags.div(style="margin-bottom: 1.5rem;"),
 
-                st.success(f"✅ Successfully recorded Transaction **#{rec_res['id']}**: {signed_qty:+,.4f} shares of **{ticker_input}** on **{tx_date}**!")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Failed to record transaction: {ex}")
+        # 2. Historical Transactions & Current Net Positions
+        ui.row(
+            ui.column(
+                7,
+                ui.tags.h4("📋 Recorded Transactions History", style="margin-bottom: 8px;"),
+                ui.output_ui("recorded_tx_table_ui")
+            ),
+            ui.column(
+                5,
+                ui.tags.h4("📊 Current Net Share Positions", style="margin-bottom: 8px;"),
+                ui.output_ui("net_positions_table_ui")
+            )
+        )
+    )
 
-    st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 
-    # -------------------------------------------------------------------------
-    # 2. Historical Transactions & Current Net Positions
-    # -------------------------------------------------------------------------
-    col_hist, col_pos = st.columns([1.3, 0.9])
+@module.server
+def tab_transactions_server(input, output, session, shared_data: Callable[[], Dict[str, Any]]):
+    """Server reactive logic for Transactions tab."""
+    refresh_trigger = reactive.value(0)
+    submit_status = reactive.value(None)
 
-    with col_hist:
-        st.markdown("#### 📋 Recorded Transactions History")
-        tx_df = fetch_all_transactions(limit=100, engine=engine)
-        if not tx_df.empty:
-            formatted_tx = []
-            for _, r in tx_df.iterrows():
-                q = float(r["QUANTITY"])
-                q_sign = "+" if q > 0 else ""
-                q_str = f"{q_sign}{q:,.2f}" if not q.is_integer() else f"{q_sign}{q:,.0f}"
-                tx_type = "BUY" if q > 0 else "SELL"
-                formatted_tx.append({
-                    "ID": int(r["ID"]),
-                    "Ticker": str(r["TICKER"]),
-                    "Date": str(r["TRANSACTION_DATE"]),
-                    "Type": tx_type,
-                    "Quantity": q_str,
-                })
-            st.dataframe(pd.DataFrame(formatted_tx), use_container_width=True, hide_index=True)
-        else:
-            st.info("No transaction records found in the database.")
+    @render.ui
+    def next_id_ui():
+        _ = refresh_trigger()
+        try:
+            next_id = get_next_transaction_id()
+            return ui.HTML(f"""
+            <div style="margin-bottom: 12px;">
+                <label class="form-label" style="font-size: 0.85rem; font-weight: 600; color: #64748B;">Transaction ID (Auto-Incremented):</label>
+                <input class="form-control" type="text" value="#{next_id}" disabled readonly style="background-color: #F1F5F9; font-weight: 600;">
+            </div>
+            """)
+        except Exception:
+            return ui.HTML("")
 
-    with col_pos:
-        st.markdown("#### 📊 Current Net Share Positions")
-        positions = fetch_portfolio_positions(engine=engine)
-        if positions:
-            pos_rows = [
-                {"Ticker": t, "Net Shares": f"{sh:,.2f}" if not sh.is_integer() else f"{sh:,.0f}"}
-                for t, sh in positions.items()
-            ]
-            st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No active positions currently held.")
+    # Live Yahoo Quote Preview
+    @reactive.calc
+    def quote_preview_data():
+        ticker = (input.ticker_input() or "").strip().upper()
+        tx_date_val = input.tx_date() or date.today()
+        qty = float(input.qty_input() or 0.0)
+
+        if not ticker:
+            return None
+
+        quote_info = query_yahoo_close_price(ticker=ticker, target_date=tx_date_val)
+        return {"quote_info": quote_info, "ticker": ticker, "qty": qty, "date": tx_date_val}
+
+    @render.ui
+    def yahoo_preview_ui():
+        pdata = quote_preview_data()
+        if not pdata:
+            return ui.HTML('<div class="text-muted">Enter a ticker symbol to look up its market closing price and GBP translated quote.</div>')
+
+        quote_info = pdata["quote_info"]
+        ticker = pdata["ticker"]
+        qty = pdata["qty"]
+
+        if quote_info.get("status") != "success":
+            msg = quote_info.get("message", f"Could not retrieve price for {ticker}.")
+            return ui.HTML(f'<div class="alert alert-warning">{msg}</div>')
+
+        px = float(quote_info["close_price"])
+        curr = str(quote_info.get("currency", "USD"))
+        found_dt = str(quote_info["found_date"])
+        is_exact = bool(quote_info["is_exact_date"])
+        fx_rate = float(quote_info.get("fx_rate_to_gbp", 1.0))
+        fx_desc = str(quote_info.get("fx_description", ""))
+        px_gbp = float(quote_info.get("close_price_gbp", px * fx_rate))
+
+        total_val_orig = px * qty
+        total_val_gbp = px_gbp * qty
+
+        curr_sym = "£" if curr == "GBP" else ("p" if curr in ["GBp", "GBX"] else ("$" if curr == "USD" else ("€" if curr == "EUR" else f"{curr} ")))
+        orig_quote_str = f"{px:,.2f} {curr}" if curr in ["GBp", "GBX"] else f"{curr_sym}{px:,.2f} {curr}"
+        orig_val_str = f"{total_val_orig:,.2f} {curr}" if curr in ["GBp", "GBX"] else f"{curr_sym}{total_val_orig:,.2f} {curr}"
+
+        fx_banner = (
+            f'<div class="alert alert-info py-2" style="font-size: 0.85rem;">💱 <b>FX Rate:</b> 1 {curr} = <b>£{fx_rate:,.4f} GBP</b><br><i>{fx_desc}</i></div>'
+            if curr != "GBP" else
+            '<div class="alert alert-success py-2" style="font-size: 0.85rem;">💱 <b>Currency:</b> Native GBP (FX Rate: 1.00)</div>'
+        )
+
+        date_badge = '<span class="badge bg-success">Exact Match</span>' if is_exact else '<span class="badge bg-warning text-dark">Nearest Prior Market Day</span>'
+
+        return ui.HTML(f"""
+        <div>
+            <div class="row g-2 mb-3">
+                <div class="col-6">
+                    <div class="p-2 border rounded" style="background-color: #F8FAFC;">
+                        <small class="text-muted d-block">Price in GBP ({ticker})</small>
+                        <b style="font-size: 1.1rem; color: #1E3A8A;">£{px_gbp:,.2f} GBP</b>
+                    </div>
+                </div>
+                <div class="col-6">
+                    <div class="p-2 border rounded" style="background-color: #F8FAFC;">
+                        <small class="text-muted d-block">Original Quote ({curr})</small>
+                        <b style="font-size: 1.1rem; color: #0F172A;">{orig_quote_str}</b>
+                    </div>
+                </div>
+            </div>
+
+            {fx_banner}
+
+            <div class="mb-3" style="font-size: 0.85rem; color: #64748B;">
+                📅 <b>Trading Date Found:</b> <code>{found_dt}</code> {date_badge}
+            </div>
+
+            <hr style="margin: 8px 0;">
+
+            <div class="row g-2">
+                <div class="col-6">
+                    <div class="p-2 border rounded" style="background-color: #F1F5F9;">
+                        <small class="text-muted d-block">Est. Total Value (GBP)</small>
+                        <b style="font-size: 1.15rem; color: #10B981;">£{total_val_gbp:,.2f} GBP</b>
+                        <small class="text-muted d-block" style="font-size: 0.75rem;">{qty:,.4f} shs @ £{px_gbp:,.2f}</small>
+                    </div>
+                </div>
+                <div class="col-6">
+                    <div class="p-2 border rounded" style="background-color: #F1F5F9;">
+                        <small class="text-muted d-block">Est. Value ({curr})</small>
+                        <b style="font-size: 1.15rem; color: #0F172A;">{orig_val_str}</b>
+                        <small class="text-muted d-block" style="font-size: 0.75rem;">{qty:,.4f} shs @ {orig_quote_str}</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """)
+
+    # Submission Effect
+    @reactive.effect
+    @reactive.event(input.submit_btn)
+    def _handle_tx_submit():
+        ticker = (input.ticker_input() or "").strip().upper()
+        if not ticker:
+            submit_status.set({"status": "error", "msg": "Please enter a valid ticker symbol."})
+            return
+
+        tx_date_val = input.tx_date() or date.today()
+        qty = float(input.qty_input() or 0.0)
+        action_val = input.action() or "BUY"
+        signed_qty = qty if action_val == "BUY" else -abs(qty)
+        sync_prices = bool(input.sync_prices())
+
+        try:
+            next_id = get_next_transaction_id()
+            rec_res = record_transaction(
+                ticker=ticker,
+                transaction_date=tx_date_val,
+                quantity=signed_qty,
+                transaction_id=next_id
+            )
+
+            if sync_prices:
+                try:
+                    fetch_and_store_ticker(ticker=ticker)
+                    fetch_and_store_fx_rate(from_curr="USD")
+                    calculate_and_store_daily_portfolio_values(backfill_days=30)
+                    calculate_and_store_daily_benchmark_values()
+                except Exception as e:
+                    pass
+
+            submit_status.set({
+                "status": "success",
+                "msg": f"✅ Successfully recorded Transaction #{rec_res['id']}: {signed_qty:+,.4f} shares of {ticker} on {tx_date_val}!"
+            })
+            refresh_trigger.set(refresh_trigger() + 1)
+        except Exception as ex:
+            submit_status.set({"status": "error", "msg": f"Failed to record transaction: {ex}"})
+
+    @render.ui
+    def tx_submit_result_ui():
+        st_val = submit_status()
+        if not st_val:
+            return ui.HTML("")
+        cls = "alert alert-success" if st_val["status"] == "success" else "alert alert-danger"
+        return ui.HTML(f'<div class="{cls} py-2" style="font-size: 0.9rem;">{st_val["msg"]}</div>')
+
+    # Recorded Transactions Table
+    @render.ui
+    def recorded_tx_table_ui():
+        _ = refresh_trigger()
+        tx_df = fetch_all_transactions(limit=100)
+        if tx_df.empty:
+            return ui.HTML('<div class="text-muted">No transaction records found in the database.</div>')
+
+        rows_html = "".join([
+            f"""
+            <tr>
+                <td><b>#{int(r['ID'])}</b></td>
+                <td><b>{str(r['TICKER'])}</b></td>
+                <td>{str(r['TRANSACTION_DATE'])}</td>
+                <td><span class="badge {'bg-success' if float(r['QUANTITY']) > 0 else 'bg-danger'}">{'BUY' if float(r['QUANTITY']) > 0 else 'SELL'}</span></td>
+                <td>{f"+{float(r['QUANTITY']):,.2f}" if float(r['QUANTITY']) > 0 else f"{float(r['QUANTITY']):,.2f}"}</td>
+            </tr>
+            """ for _, r in tx_df.iterrows()
+        ])
+
+        return ui.HTML(f"""
+        <div style="overflow-x: auto; max-height: 400px;">
+            <table class="custom-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Ticker</th>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th>Quantity</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+        """)
+
+    # Current Net Positions Table
+    @render.ui
+    def net_positions_table_ui():
+        _ = refresh_trigger()
+        positions = fetch_portfolio_positions()
+        if not positions:
+            return ui.HTML('<div class="text-muted">No active positions currently held.</div>')
+
+        rows_html = "".join([
+            f"""
+            <tr>
+                <td><b>{t}</b></td>
+                <td><b>{sh:,.2f}</b></td>
+            </tr>
+            """ for t, sh in positions.items()
+        ])
+
+        return ui.HTML(f"""
+        <div style="overflow-x: auto; max-height: 400px;">
+            <table class="custom-table">
+                <thead>
+                    <tr>
+                        <th>Ticker</th>
+                        <th>Net Shares</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+        """)
 
 
