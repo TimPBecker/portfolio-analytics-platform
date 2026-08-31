@@ -1,0 +1,54 @@
+name: CI - Unit & Integration Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Run Monorepo Unit Tests
+    runs-on: ubuntu-latest
+    env:
+      PORTFOLIO_ENV: test
+      TEST_MODE: "1"
+      PYTHONPATH: .
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: 📥 Check out repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: |
+            packages/portfolio-core/pyproject.toml
+            apps/dashboard/requirements.txt
+            apps/pipeline/requirements.txt
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ./packages/portfolio-core
+          pip install -r ./apps/dashboard/requirements.txt
+          pip install -r ./apps/pipeline/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: 🧪 Run Pytest suite
+        run: |
+          pytest -v --tb=short
