@@ -246,22 +246,43 @@ def test_dev_environment_database_restriction(monkeypatch):
 
 
 def test_get_engine_with_database_param():
-    """Verify get_engine accepts explicit database name parameter."""
+    """Verify get_engine and get_connection_string accept explicit database name parameter."""
     from portfolio_core.db import get_engine, get_connection_string
 
-    # In test mode (asserted by is_test=True)
-    conn_str = get_connection_string(database="stocks_dev", is_test=True)
-    assert conn_str.endswith("/stocks_dev")
+    # In test mode with explicit dev database parameter
+    conn_str_test = get_connection_string(
+        db_type="mariadb",
+        user="test_user",
+        password="test_password",
+        host="localhost",
+        port=3306,
+        database="custom_portfolio_dev",
+        is_test=True
+    )
+    assert conn_str_test.endswith("/custom_portfolio_dev")
+
+    # In test mode with base database name (auto-mapped to _dev)
+    conn_str_auto_dev = get_connection_string(
+        db_type="mariadb",
+        user="test_user",
+        password="test_password",
+        host="localhost",
+        port=3306,
+        database="custom_portfolio",
+        is_test=True
+    )
+    assert conn_str_auto_dev.endswith("/custom_portfolio_dev")
 
     # In production non-test mode explicit resolution
     conn_str_prod = get_connection_string(
         db_type="mariadb",
-        user="user",
-        password="pwd",
+        user="test_user",
+        password="test_password",
         host="localhost",
         port=3306,
         database="stocks",
-        is_test=False
+        is_test=False,
+        is_dev=False
     )
     assert conn_str_prod.endswith("/stocks")
 
