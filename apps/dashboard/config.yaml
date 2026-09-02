@@ -32,7 +32,7 @@ analytics:
 
 # 3. Streamlit UI Settings
 ui:
-  app_title: "Portfolio Risk & Volatility Analytics"
+  app_title: "Portfolio Risk Analytics"
   app_icon: "📈"
   layout: "wide"
   initial_sidebar_state: "collapsed"
