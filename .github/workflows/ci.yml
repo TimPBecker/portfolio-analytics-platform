@@ -21,6 +21,7 @@ jobs:
       PORTFOLIO_ENV: test
       TEST_MODE: "1"
       PYTHONPATH: .
+      DB_PASSWORD: "test_password_ci"
 
     strategy:
       fail-fast: false
