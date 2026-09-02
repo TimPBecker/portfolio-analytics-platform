@@ -4,6 +4,7 @@ Enforces strict dev database usage and automatic cleanup of test SQLite files (.
 """
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 import pytest
 from sqlalchemy import Engine, text
@@ -38,7 +39,7 @@ def strictly_dev_db_guard(monkeypatch):
 
 
 @pytest.fixture
-def sqlite_test_engine() -> Engine:
+def sqlite_test_engine() -> Iterator[Engine]:
     """Isolated on-demand SQLite test database fixture."""
     engine = create_test_sqlite_engine(sqlite_path=":memory:", initialize_schema=True)
     yield engine
@@ -46,7 +47,7 @@ def sqlite_test_engine() -> Engine:
 
 
 @pytest.fixture
-def temp_sqlite_file_engine(tmp_path) -> Engine:
+def temp_sqlite_file_engine(tmp_path) -> Iterator[tuple[Engine, str]]:
     """File-backed on-demand SQLite database (.s3db / .s2db) with guaranteed file deletion."""
     db_file = tmp_path / "temp_test_db.s3db"
     engine = create_test_sqlite_engine(sqlite_path=str(db_file), initialize_schema=True)
@@ -57,7 +58,7 @@ def temp_sqlite_file_engine(tmp_path) -> Engine:
 
 
 @pytest.fixture
-def mariadb_dev_engine() -> Engine:
+def mariadb_dev_engine() -> Iterator[Engine]:
     """MariaDB dev database ('stocks_dev') fixture."""
     db_cfg = get_db_config(is_test=True)
     target_db = get_dev_database_name(db_cfg.get("database", "stocks"))
@@ -73,7 +74,7 @@ def mariadb_dev_engine() -> Engine:
 
 
 @pytest.fixture
-def test_engine() -> Engine:
+def test_engine() -> Iterator[Engine]:
     """Standard test database fixture."""
     engine = get_test_engine(initialize_schema=True, fallback_to_sqlite=True)
     yield engine
