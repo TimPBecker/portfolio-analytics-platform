@@ -30,7 +30,8 @@ except ImportError:
 def render_tab_returns(
     prices_gbp: pd.DataFrame,
     available_tickers: List[str],
-    engine: Optional[Engine] = None
+    engine: Optional[Engine] = None,
+    raw_prices_cache: Optional[Dict[str, pd.DataFrame]] = None
 ):
     """Renders the Price Levels, Returns and Distribution Histogram view."""
     st.markdown("### 📊 Asset Levels, Returns & Distribution Diagnostics")
@@ -59,8 +60,11 @@ def render_tab_returns(
     with col_c4:
         return_type = st.selectbox("Return Type:", ["Log Returns (ln)", "Simple Returns (%)"], index=0)
 
-    # Fetch raw data for selected ticker
-    raw_df = fetch_raw_asset_prices(selected_ticker, engine=engine)
+    # Fetch raw data for selected ticker (from cache if pre-warmed, else from database)
+    if raw_prices_cache and selected_ticker in raw_prices_cache:
+        raw_df = raw_prices_cache[selected_ticker].copy()
+    else:
+        raw_df = fetch_raw_asset_prices(selected_ticker, engine=engine)
 
     if raw_df.empty:
         st.warning(f"No price records found for ticker {selected_ticker}.")

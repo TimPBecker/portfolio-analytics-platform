@@ -4,9 +4,10 @@ Interactive web application powered by Streamlit, Plotly, and SQLAlchemy.
 """
 
 import os
+import concurrent.futures
 import streamlit as st
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 
 from portfolio_core.config import config, is_dev_environment
 from portfolio_core.db import (
@@ -15,44 +16,108 @@ from portfolio_core.db import (
     fetch_available_tickers,
     fetch_historical_prices_gbp,
     fetch_portfolio_positions,
-    fetch_available_var_dates
+    fetch_available_var_dates,
+    fetch_portfolio_values_history,
+    fetch_benchmarks_info,
+    fetch_benchmark_values_history,
+    fetch_all_transactions,
+    fetch_raw_asset_prices
 )
-from src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
-from src.ui.tab_volatility import render_tab_volatility
-from src.ui.tab_var import render_tab_var
-from src.ui.tab_returns import render_tab_returns
-from src.ui.tab_portfolio import render_tab_portfolio
-from src.ui.tab_benchmarks import render_tab_benchmarks
-from src.ui.tab_transactions import render_tab_transactions
+try:
+    from src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
+    from src.ui.tab_volatility import render_tab_volatility
+    from src.ui.tab_var import render_tab_var
+    from src.ui.tab_returns import render_tab_returns
+    from src.ui.tab_portfolio import render_tab_portfolio
+    from src.ui.tab_benchmarks import render_tab_benchmarks
+    from src.ui.tab_transactions import render_tab_transactions
+except ImportError:
+    from apps.dashboard.src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
+    from apps.dashboard.src.ui.tab_volatility import render_tab_volatility
+    from apps.dashboard.src.ui.tab_var import render_tab_var
+    from apps.dashboard.src.ui.tab_returns import render_tab_returns
+    from apps.dashboard.src.ui.tab_portfolio import render_tab_portfolio
+    from apps.dashboard.src.ui.tab_benchmarks import render_tab_benchmarks
+    from apps.dashboard.src.ui.tab_transactions import render_tab_transactions
 
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration
 # -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title=config.ui_config.get("app_title", "Portfolio Risk Analytics"),
-    page_icon=config.ui_config.get("app_icon", "📈"),
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+try:
+    st.set_page_config(
+        page_title=config.ui_config.get("app_title", "Portfolio Risk Analytics"),
+        page_icon=config.ui_config.get("app_icon", "📈"),
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
+except Exception:
+    pass
 
 # Inject custom styling & auto-collapse sidebar
-inject_custom_css()
-ensure_sidebar_collapsed()
+try:
+    inject_custom_css()
+    ensure_sidebar_collapsed()
+except Exception:
+    pass
 
 
 # -----------------------------------------------------------------------------
-# 2. Cached Data Loaders
+# 2. Cached Parallel Data Loader (Option 1: ThreadPool Pre-calculation)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
-def load_cached_data(db_name: str) -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
-    """Loads and caches market prices, tickers, positions, and risk dates for the specified database."""
+def load_cached_data_parallel(db_name: str) -> Dict[str, Any]:
+    """
+    Loads and caches core market prices, positions, and pre-fetches all tab data
+    concurrently across background worker threads for maximum responsiveness.
+    """
     engine = get_engine(database=db_name)
-    tickers = fetch_available_tickers(engine=engine)
-    prices_gbp = fetch_historical_prices_gbp(engine=engine)
-    positions = fetch_portfolio_positions(engine=engine)
-    var_dates = fetch_available_var_dates(engine=engine)
-    return prices_gbp, tickers, positions, var_dates
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        f_tickers = executor.submit(fetch_available_tickers, engine=engine)
+        f_prices = executor.submit(fetch_historical_prices_gbp, engine=engine)
+        f_positions = executor.submit(fetch_portfolio_positions, engine=engine)
+        f_var_dates = executor.submit(fetch_available_var_dates, engine=engine)
+        f_pv = executor.submit(fetch_portfolio_values_history, days=None, engine=engine)
+        f_bm_info = executor.submit(fetch_benchmarks_info, engine=engine)
+        f_bm_history = executor.submit(fetch_benchmark_values_history, engine=engine)
+        f_tx = executor.submit(fetch_all_transactions, limit=100, engine=engine)
+
+        tickers = f_tickers.result()
+        prices_gbp = f_prices.result()
+        positions = f_positions.result()
+        var_dates = f_var_dates.result()
+        pv_df = f_pv.result()
+        bm_info_df = f_bm_info.result()
+        bm_history_df = f_bm_history.result()
+        transactions_df = f_tx.result()
+
+    # Pre-fetch raw prices for the default selected ticker in Tab 4
+    raw_cache: Dict[str, pd.DataFrame] = {}
+    default_ticker = "NVDA" if "NVDA" in tickers else (tickers[0] if tickers else None)
+    if default_ticker:
+        try:
+            raw_cache[default_ticker] = fetch_raw_asset_prices(default_ticker, engine=engine)
+        except Exception:
+            pass
+
+    return {
+        "prices_gbp": prices_gbp,
+        "tickers": tickers,
+        "positions": positions,
+        "var_dates": var_dates,
+        "pv_df": pv_df,
+        "bm_info_df": bm_info_df,
+        "bm_history_df": bm_history_df,
+        "transactions_df": transactions_df,
+        "raw_prices_cache": raw_cache
+    }
+
+
+def load_cached_data(db_name: str) -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
+    """Legacy helper returning tuple for backward compatibility."""
+    bundle = load_cached_data_parallel(db_name)
+    return bundle["prices_gbp"], bundle["tickers"], bundle["positions"], bundle["var_dates"]
 
 
 # -----------------------------------------------------------------------------
@@ -142,9 +207,19 @@ with st.sidebar:
 st.title("📈 Portfolio Risk Analytics")
 st.markdown("Interactive quantitative risk suite for rolling volatilities, tail risk percentiles, and return distribution modeling.")
 
-# Load core data for selected database
-with st.spinner(f"Connecting to database '{selected_db}' and loading market data..."):
-    prices_gbp, available_tickers, positions, var_dates = load_cached_data(selected_db)
+# Load core data and precalculate tab datasets for selected database concurrently
+with st.spinner(f"Connecting to database '{selected_db}' and pre-calculating tab analytics in parallel..."):
+    data_bundle = load_cached_data_parallel(selected_db)
+
+prices_gbp = data_bundle["prices_gbp"]
+available_tickers = data_bundle["tickers"]
+positions = data_bundle["positions"]
+var_dates = data_bundle["var_dates"]
+pv_df = data_bundle["pv_df"]
+bm_info_df = data_bundle["bm_info_df"]
+bm_history_df = data_bundle["bm_history_df"]
+transactions_df = data_bundle["transactions_df"]
+raw_prices_cache = data_bundle["raw_prices_cache"]
 
 if prices_gbp.empty:
     st.error(f"No historical market price data found in database '{selected_db}'. Please ensure the database is accessible and populated.")
@@ -178,14 +253,18 @@ with tab1:
         positions=positions,
         asof_date=latest_date_str,
         engine=active_engine,
-        db_name=selected_db
+        db_name=selected_db,
+        pv_df=pv_df
     )
 
 with tab2:
     render_tab_benchmarks(
         prices_gbp=prices_gbp,
         asof_date=latest_date_str,
-        engine=active_engine
+        engine=active_engine,
+        bm_info_df=bm_info_df,
+        bm_history_df=bm_history_df,
+        pv_df=pv_df
     )
 
 with tab3:
@@ -200,16 +279,20 @@ with tab4:
     render_tab_returns(
         prices_gbp=prices_gbp,
         available_tickers=available_tickers,
-        engine=active_engine
+        engine=active_engine,
+        raw_prices_cache=raw_prices_cache
     )
 
 with tab5:
     render_tab_volatility(
         prices_gbp=prices_gbp,
-        available_tickers=available_tickers
+        available_tickers=available_tickers,
+        raw_prices_cache=raw_prices_cache
     )
 
 with tab6:
     render_tab_transactions(
-        engine=active_engine
+        engine=active_engine,
+        transactions_df=transactions_df,
+        positions_dict=positions
     )
