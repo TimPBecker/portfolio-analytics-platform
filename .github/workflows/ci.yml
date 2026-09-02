@@ -44,10 +44,9 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install -e ./packages/portfolio-core
-          pip install -r ./apps/dashboard/requirements.txt
-          pip install -r ./apps/pipeline/requirements.txt
-          pip install pytest pytest-cov
+          python -m pip install -e ./packages/portfolio-core \
+            -r ./apps/dashboard/requirements.txt \
+            -r ./apps/pipeline/requirements.txt
 
       - name: 🧪 Run Pytest suite
         run: |
