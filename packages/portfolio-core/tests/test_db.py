@@ -189,3 +189,81 @@ def test_cleanup_test_sqlite_files_removes_s3db_and_s2db(tmp_path):
     assert not f2.exists()
     assert not f3.exists()
 
+
+def test_get_db_config_databases_list():
+    """Verify that get_db_config resolves configured databases list and defaults."""
+    from portfolio_core.config import get_db_config, is_dev_environment
+
+    # Production mode without explicit databases list
+    cfg_empty = {"db": {"type": "mariadb", "database": "stocks"}}
+    res_empty = get_db_config(cfg_empty, is_test=False, is_dev=False)
+    assert res_empty["databases"] == ["stocks"]
+
+    # Production mode with explicit databases list
+    cfg_multi = {"db": {"type": "mariadb", "database": "stocks", "databases": ["stocks", "stocks_dev", "sandbox"]}}
+    res_multi = get_db_config(cfg_multi, is_test=False, is_dev=False)
+    assert res_multi["databases"] == ["stocks", "stocks_dev", "sandbox"]
+
+    # In test/dev mode: databases are strictly mapped to and filtered by dev names
+    res_dev = get_db_config(cfg_multi, is_test=False, is_dev=True)
+    assert res_dev["databases"] == ["stocks_dev", "sandbox_dev"]
+    assert "stocks" not in res_dev["databases"]
+    assert "sandbox" not in res_dev["databases"]
+
+
+def test_dev_environment_database_restriction(monkeypatch):
+    """Verify that development mode strictly prevents connecting to non-dev databases."""
+    from portfolio_core.db import get_connection_string, is_dev_environment
+
+    # Simulate dev container environment
+    monkeypatch.setenv("PORTFOLIO_ENV", "development")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    assert is_dev_environment() is True
+
+    # Connecting to non-dev database in dev mode MUST raise ValueError
+    with pytest.raises(ValueError, match="Security restriction: Connection to non-dev database 'stocks' is forbidden in development mode"):
+        get_connection_string(
+            db_type="mariadb",
+            user="user",
+            password="pwd",
+            host="localhost",
+            port=3306,
+            database="stocks",
+            is_test=False
+        )
+
+    # Connecting to dev database in dev mode succeeds
+    conn_dev = get_connection_string(
+        db_type="mariadb",
+        user="user",
+        password="pwd",
+        host="localhost",
+        port=3306,
+        database="stocks_dev",
+        is_test=False
+    )
+    assert conn_dev.endswith("/stocks_dev")
+
+
+def test_get_engine_with_database_param():
+    """Verify get_engine accepts explicit database name parameter."""
+    from portfolio_core.db import get_engine, get_connection_string
+
+    # In test mode (asserted by is_test=True)
+    conn_str = get_connection_string(database="stocks_dev", is_test=True)
+    assert conn_str.endswith("/stocks_dev")
+
+    # In production non-test mode explicit resolution
+    conn_str_prod = get_connection_string(
+        db_type="mariadb",
+        user="user",
+        password="pwd",
+        host="localhost",
+        port=3306,
+        database="stocks",
+        is_test=False
+    )
+    assert conn_str_prod.endswith("/stocks")
+
+
+

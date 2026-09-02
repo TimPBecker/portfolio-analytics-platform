@@ -12,6 +12,9 @@ db:
   port: 3306
   user: "stocks"
   database: "stocks"
+  # List of selectable databases in the dashboard side menu dropdown
+  databases:
+    - "stocks"
   # DB_PASSWORD is read securely from the .env environment variable
 
   # --- SQLite Configuration (Alternative) ---

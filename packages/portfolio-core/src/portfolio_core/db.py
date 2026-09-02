@@ -50,6 +50,21 @@ def is_test_environment(is_test: Optional[bool] = None) -> bool:
     return False
 
 
+def is_dev_environment(is_dev: Optional[bool] = None) -> bool:
+    """
+    Determines whether current execution context is in development mode.
+    Checks explicit parameter or environment variables (PORTFOLIO_ENV in ('development', 'dev'), DEV_MODE=1).
+    """
+    if is_dev is not None:
+        return bool(is_dev)
+    env_mode = os.getenv("PORTFOLIO_ENV", "").lower()
+    if env_mode in ("development", "dev"):
+        return True
+    if os.getenv("DEV_MODE") == "1":
+        return True
+    return False
+
+
 def get_connection_string(
     db_type: Optional[str] = None,
     user: Optional[str] = None,
@@ -60,6 +75,7 @@ def get_connection_string(
     sqlite_path: Optional[str] = None,
     config_path: Optional[str] = None,
     is_test: Optional[bool] = None,
+    is_dev: Optional[bool] = None,
 ) -> str:
     """
     Constructs a database connection string with safe URL-encoding of credentials.
@@ -68,11 +84,15 @@ def get_connection_string(
     The secret password is read from the DB_PASSWORD environment variable for MariaDB.
     When running in test mode (is_test=True, PORTFOLIO_ENV=test, TEST_MODE=1, or active pytest),
     it strictly targets the dev database ('<database_name>_dev', e.g. 'stocks_dev') or an on-demand SQLite test db.
+    When running in development mode (PORTFOLIO_ENV=development, DEV_MODE=1), connecting to any non-dev database
+    (not ending with '_dev') is strictly prohibited.
     """
-    from portfolio_core.config import get_db_config, load_config
+    from portfolio_core.config import get_db_config, load_config, is_dev_environment as config_is_dev
     in_test = is_test_environment(is_test)
+    in_dev = config_is_dev(is_dev)
+
     loaded_cfg = load_config(config_path) if config_path else {}
-    db_cfg = get_db_config(loaded_cfg, is_test=in_test) if loaded_cfg else get_db_config(is_test=in_test)
+    db_cfg = get_db_config(loaded_cfg, is_test=in_test, is_dev=in_dev) if loaded_cfg else get_db_config(is_test=in_test, is_dev=in_dev)
 
     t = (db_type or db_cfg.get("type") or "mariadb").lower()
 
@@ -84,6 +104,11 @@ def get_connection_string(
             elif sp != ":memory:" and not sp.endswith("_dev.s3db"):
                 base = sp[:-5] if sp.endswith(".s3db") else sp
                 sp = f"{base}_dev.s3db"
+        elif in_dev and sp and sp != ":memory:" and not sp.endswith("_dev.s3db"):
+            raise ValueError(
+                f"Security restriction: Connection to non-dev SQLite database '{sp}' is forbidden in development mode. "
+                f"SQLite database file path in development must end with '_dev.s3db'."
+            )
         if not sp:
             raise ValueError(
                 "Database configuration error: Missing 'sqlite_path' for SQLite database. "
@@ -111,6 +136,11 @@ def get_connection_string(
 
     if in_test and db:
         db = get_dev_database_name(db)
+    elif in_dev and db and not db.endswith("_dev"):
+        raise ValueError(
+            f"Security restriction: Connection to non-dev database '{db}' is forbidden in development mode. "
+            f"Database names in development must strictly end with '_dev' (e.g. '{db}_dev')."
+        )
 
     missing = []
     if not u: missing.append("user")
@@ -128,11 +158,21 @@ def get_connection_string(
     return f"mysql+pymysql://{u}:{quote_plus(str(p))}@{h}:{int(prt)}/{db}"
 
 
-def get_engine(connection_string=None, is_test: Optional[bool] = None) -> Engine:
-    """Returns a SQLAlchemy engine. Automatically resolves to dev database when in test mode."""
+def get_engine(
+    connection_string: Optional[Union[str, Engine]] = None,
+    is_test: Optional[bool] = None,
+    is_dev: Optional[bool] = None,
+    database: Optional[str] = None,
+    **kwargs
+) -> Engine:
+    """Returns a SQLAlchemy engine. Automatically resolves to dev database when in test mode and enforces dev safety."""
     if hasattr(connection_string, "connect"):
         return connection_string
-    return create_engine(connection_string or get_connection_string(is_test=is_test))
+    if isinstance(connection_string, str):
+        conn_str = connection_string
+    else:
+        conn_str = get_connection_string(is_test=is_test, is_dev=is_dev, database=database, **kwargs)
+    return create_engine(conn_str)
 
 
 def create_test_sqlite_engine(
@@ -216,10 +256,10 @@ def get_test_engine(
         raise e
 
 
-def test_db_connection(engine: Optional[Engine] = None) -> Tuple[bool, str]:
+def test_db_connection(engine: Optional[Engine] = None, database: Optional[str] = None) -> Tuple[bool, str]:
     """Tests if the database connection is alive and returns status message."""
     try:
-        eng = engine or get_engine()
+        eng = engine or get_engine(database=database)
         with eng.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True, "Connected successfully"

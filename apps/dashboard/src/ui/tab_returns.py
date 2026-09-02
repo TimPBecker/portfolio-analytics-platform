@@ -18,13 +18,18 @@ from portfolio_core.analytics.statistics import (
     generate_density_curves,
     compute_qq_plot_data
 )
-from portfolio_core.db import fetch_raw_asset_prices
-from src.ui.theme import PALETTE, get_plotly_layout_defaults
+from sqlalchemy.engine import Engine
+
+try:
+    from src.ui.theme import PALETTE, get_plotly_layout_defaults
+except ImportError:
+    from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
 
 
 def render_tab_returns(
     prices_gbp: pd.DataFrame,
-    available_tickers: List[str]
+    available_tickers: List[str],
+    engine: Optional[Engine] = None
 ):
     """Renders the Price Levels, Returns and Distribution Histogram view."""
     st.markdown("### 📊 Asset Levels, Returns & Distribution Diagnostics")
@@ -54,7 +59,7 @@ def render_tab_returns(
         return_type = st.selectbox("Return Type:", ["Log Returns (ln)", "Simple Returns (%)"], index=0)
 
     # Fetch raw data for selected ticker
-    raw_df = fetch_raw_asset_prices(selected_ticker)
+    raw_df = fetch_raw_asset_prices(selected_ticker, engine=engine)
 
     if raw_df.empty:
         st.warning(f"No price records found for ticker {selected_ticker}.")

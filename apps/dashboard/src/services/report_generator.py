@@ -47,7 +47,8 @@ def find_quarto_binary() -> Optional[str]:
 
 def generate_portfolio_pdf_report(
     asof_date: Optional[str] = None,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    db_name: Optional[str] = None
 ) -> Tuple[bool, Optional[str], Optional[bytes], Optional[str]]:
     """
     Executes Quarto CLI to render the Typst portfolio report into a standalone PDF.
@@ -79,6 +80,8 @@ def generate_portfolio_pdf_report(
     env["PATH"] = f"/usr/local/bin:/usr/bin:/bin:/opt/quarto/bin:{env.get('PATH', '')}"
     if asof_date:
         env["REPORT_ASOF_DATE"] = str(asof_date)[:10]
+    if db_name:
+        env["DB_NAME"] = str(db_name)
 
     # Remove stale files before rendering
     expected_in_template_dir = template_path.parent / output_pdf_path.name
