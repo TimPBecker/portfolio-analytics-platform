@@ -21,8 +21,10 @@ from portfolio_core.analytics.volatility import (
     calculate_scaling_factors,
     compute_volatility_summary_metrics
 )
-from portfolio_core.analytics.statistics import compute_asset_returns
-from src.ui.theme import PALETTE, STOCK_COLORS, get_plotly_layout_defaults
+try:
+    from src.ui.theme import PALETTE, STOCK_COLORS, get_plotly_layout_defaults
+except ImportError:
+    from apps.dashboard.src.ui.theme import PALETTE, STOCK_COLORS, get_plotly_layout_defaults
 
 
 # Color palette for distinct estimators

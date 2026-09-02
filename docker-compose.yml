@@ -49,7 +49,7 @@ services:
       - dask-scheduler
 
   # ---------------------------------------------------------------------------
-  # 3. Streamlit Risk & Volatility Analytics Dashboard
+  # 3. Streamlit Risk & Volatility Analytics Dashboard (Production - stocks)
   # ---------------------------------------------------------------------------
   risk-dashboard:
     build:
@@ -59,12 +59,36 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - DB_NAME=stocks
+      - PORTFOLIO_ENV=production
     volumes:
       - ./apps/dashboard:/app
       - ./packages/portfolio-core:/packages/portfolio-core
       - ./reports:/reports
     ports:
       - "8501:8501"
+
+  # ---------------------------------------------------------------------------
+  # 4. Streamlit Risk & Volatility Analytics Dashboard (Development - stocks_dev)
+  # ---------------------------------------------------------------------------
+  risk-dashboard-dev:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: portfolio-risk-dashboard-dev
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DB_NAME=stocks_dev
+      - PORTFOLIO_ENV=development
+    volumes:
+      - ./apps/dashboard:/app
+      - ./packages/portfolio-core:/packages/portfolio-core
+      - ./reports:/reports
+    ports:
+      - "8502:8501"
 
 volumes:
   dagster_storage:

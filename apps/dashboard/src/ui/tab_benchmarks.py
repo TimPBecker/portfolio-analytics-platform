@@ -23,6 +23,8 @@ from portfolio_core.db import (
     fetch_benchmark_transactions
 )
 
+from sqlalchemy.engine import Engine
+
 try:
     from src.ui.theme import PALETTE, get_plotly_layout_defaults
 except ImportError:
@@ -31,7 +33,8 @@ except ImportError:
 
 def render_tab_benchmarks(
     prices_gbp: pd.DataFrame,
-    asof_date: Optional[str] = None
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None
 ):
     """Renders the Centralized Benchmarking, Comparative Performance, and Distribution view."""
     st.markdown("### 🎯 Centralized Benchmarking & Performance Analysis")
@@ -40,7 +43,7 @@ def render_tab_benchmarks(
         "Each benchmark maintains an exact shadow portfolio matching the GBP capital deployed on every trade date."
     )
 
-    engine = get_engine()
+    engine = engine or get_engine()
 
     # Load benchmark metadata & valuations
     bm_info_df = fetch_benchmarks_info(engine=engine)
