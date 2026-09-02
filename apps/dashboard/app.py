@@ -66,12 +66,18 @@ except Exception:
 # 2. Cached Parallel Data Loader (Option 1: ThreadPool Pre-calculation)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
-def load_cached_data_parallel(db_name: str) -> Dict[str, Any]:
+def load_cached_data_parallel(db_name: str, _engine: Optional[Any] = None) -> Dict[str, Any]:
     """
     Loads and caches core market prices, positions, and pre-fetches all tab data
     concurrently across background worker threads for maximum responsiveness.
     """
-    engine = get_engine(database=db_name)
+    engine = _engine
+    if engine is None:
+        try:
+            engine = get_engine(database=db_name)
+        except Exception:
+            from portfolio_core.db import get_test_engine
+            engine = get_test_engine(fallback_to_sqlite=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         f_tickers = executor.submit(fetch_available_tickers, engine=engine)
@@ -114,9 +120,9 @@ def load_cached_data_parallel(db_name: str) -> Dict[str, Any]:
     }
 
 
-def load_cached_data(db_name: str) -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
+def load_cached_data(db_name: str, _engine: Optional[Any] = None) -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
     """Legacy helper returning tuple for backward compatibility."""
-    bundle = load_cached_data_parallel(db_name)
+    bundle = load_cached_data_parallel(db_name, _engine=_engine)
     return bundle["prices_gbp"], bundle["tickers"], bundle["positions"], bundle["var_dates"]
 
 
