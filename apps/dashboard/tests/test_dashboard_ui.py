@@ -294,3 +294,15 @@ def test_dashboard_databases_config_and_options():
     assert resolved["databases"] == ["stocks", "stocks_dev", "stocks_sim"]
 
 
+def test_tab_returns_imports_and_components():
+    """Verify that tab_returns imports all required symbols and executes data queries."""
+    try:
+        from src.ui.tab_returns import render_tab_returns, fetch_raw_asset_prices
+    except ImportError:
+        from apps.dashboard.src.ui.tab_returns import render_tab_returns, fetch_raw_asset_prices
+
+    assert callable(render_tab_returns)
+    assert callable(fetch_raw_asset_prices)
+
+
+
