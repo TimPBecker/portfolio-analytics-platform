@@ -28,7 +28,8 @@ def render_tab_portfolio(
     positions: Dict[str, float],
     asof_date: Optional[str] = None,
     engine: Optional[Engine] = None,
-    db_name: Optional[str] = None
+    db_name: Optional[str] = None,
+    pv_df: Optional[pd.DataFrame] = None
 ):
     """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view with PDF Export."""
     def _create_report_bytes() -> bytes:
@@ -82,7 +83,8 @@ def render_tab_portfolio(
     # -------------------------------------------------------------------------
     # 1. Valuation KPIs at the Top: Current Value & Previous Value (Stock Holdings Only)
     # -------------------------------------------------------------------------
-    pv_df = fetch_portfolio_values_history(days=None, asof_date=asof_date, engine=engine)
+    if pv_df is None:
+        pv_df = fetch_portfolio_values_history(days=None, asof_date=asof_date, engine=engine)
 
     if not pv_df.empty and len(pv_df) >= 1:
         curr_row = pv_df.iloc[-1]

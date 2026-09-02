@@ -34,7 +34,10 @@ except ImportError:
 def render_tab_benchmarks(
     prices_gbp: pd.DataFrame,
     asof_date: Optional[str] = None,
-    engine: Optional[Engine] = None
+    engine: Optional[Engine] = None,
+    bm_info_df: Optional[pd.DataFrame] = None,
+    bm_history_df: Optional[pd.DataFrame] = None,
+    pv_df: Optional[pd.DataFrame] = None
 ):
     """Renders the Centralized Benchmarking, Comparative Performance, and Distribution view."""
     st.markdown("### 🎯 Centralized Benchmarking & Performance Analysis")
@@ -45,10 +48,13 @@ def render_tab_benchmarks(
 
     engine = engine or get_engine()
 
-    # Load benchmark metadata & valuations
-    bm_info_df = fetch_benchmarks_info(engine=engine)
-    bm_history_df = fetch_benchmark_values_history(asof_date=asof_date, engine=engine)
-    pv_df = fetch_portfolio_values_history(asof_date=asof_date, engine=engine)
+    # Load benchmark metadata & valuations if not already pre-fetched
+    if bm_info_df is None:
+        bm_info_df = fetch_benchmarks_info(engine=engine)
+    if bm_history_df is None:
+        bm_history_df = fetch_benchmark_values_history(asof_date=asof_date, engine=engine)
+    if pv_df is None:
+        pv_df = fetch_portfolio_values_history(asof_date=asof_date, engine=engine)
 
     available_bms = bm_info_df["BENCHMARK_CODE"].tolist() if not bm_info_df.empty else []
     bm_name_map = dict(zip(bm_info_df["BENCHMARK_CODE"], bm_info_df["NAME"])) if not bm_info_df.empty else {}

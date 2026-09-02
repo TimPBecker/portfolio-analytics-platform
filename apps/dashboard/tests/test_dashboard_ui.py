@@ -305,6 +305,39 @@ def test_tab_returns_imports_and_components():
     assert callable(fetch_raw_asset_prices)
 
 
+def test_load_cached_data_parallel():
+    """Verify concurrent parallel data prefetching bundle structure."""
+    from portfolio_core.db import create_test_sqlite_engine
+
+    try:
+        from app import load_cached_data_parallel, load_cached_data
+    except ImportError:
+        from apps.dashboard.app import load_cached_data_parallel, load_cached_data
+
+    # Use isolated thread-safe SQLite test engine with initialized schema
+    test_engine = create_test_sqlite_engine(sqlite_path=":memory:", initialize_schema=True)
+
+    # Execute parallel prefetch on test engine
+    bundle = load_cached_data_parallel("stocks_dev", _engine=test_engine)
+    assert isinstance(bundle, dict)
+    assert "prices_gbp" in bundle
+    assert "tickers" in bundle
+    assert "positions" in bundle
+    assert "var_dates" in bundle
+    assert "pv_df" in bundle
+    assert "bm_info_df" in bundle
+    assert "bm_history_df" in bundle
+    assert "transactions_df" in bundle
+    assert "raw_prices_cache" in bundle
+
+    # Verify legacy compatibility wrapper
+    prices, tickers, pos, vdates = load_cached_data("stocks_dev", _engine=test_engine)
+    assert isinstance(prices, pd.DataFrame)
+    assert isinstance(tickers, list)
+    assert isinstance(pos, dict)
+    assert isinstance(vdates, list)
+
+
 def test_tab_portfolio_valuation_history_filtering():
     """Verify portfolio valuation history horizon date filtering logic."""
     dates = pd.date_range("2024-01-01", "2026-08-31", freq="B")
@@ -351,8 +384,7 @@ def test_tab_portfolio_valuation_history_filtering():
     y_min_1m, y_max_1m = df_1m["STOCKS"].min(), df_1m["STOCKS"].max()
     y_min_all, y_max_all = df_all["STOCKS"].min(), df_all["STOCKS"].max()
     assert y_min_1m > y_min_all  # 1M y-min is tighter and higher than overall all-time min
-    assert y_max_1m == pytest.approx(y_max_all, rel=1e-3)  # latest max matches
-
+    assert y_max_1m == pytest.approx(y_max_all, rel=1e-3)
 
 
 

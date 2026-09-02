@@ -30,7 +30,11 @@ except ImportError:
     from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
 
 
-def render_tab_transactions(engine: Optional[Engine] = None):
+def render_tab_transactions(
+    engine: Optional[Engine] = None,
+    transactions_df: Optional[pd.DataFrame] = None,
+    positions_dict: Optional[Dict[str, float]] = None
+):
     """Renders the Transaction Management and Trade Entry interface."""
     st.markdown("### 📝 Record Portfolio Transactions")
     st.caption("Enter new stock trade transactions into the database with real-time Yahoo Finance price lookup and automatic ID incrementation.")
@@ -208,7 +212,7 @@ def render_tab_transactions(engine: Optional[Engine] = None):
 
     with col_hist:
         st.markdown("#### 📋 Recorded Transactions History")
-        tx_df = fetch_all_transactions(limit=100, engine=engine)
+        tx_df = transactions_df if transactions_df is not None else fetch_all_transactions(limit=100, engine=engine)
         if not tx_df.empty:
             formatted_tx = []
             for _, r in tx_df.iterrows():
@@ -229,7 +233,7 @@ def render_tab_transactions(engine: Optional[Engine] = None):
 
     with col_pos:
         st.markdown("#### 📊 Current Net Share Positions")
-        positions = fetch_portfolio_positions(engine=engine)
+        positions = positions_dict if positions_dict is not None else fetch_portfolio_positions(engine=engine)
         if positions:
             pos_rows = [
                 {"Ticker": t, "Net Shares": f"{sh:,.2f}" if not sh.is_integer() else f"{sh:,.0f}"}

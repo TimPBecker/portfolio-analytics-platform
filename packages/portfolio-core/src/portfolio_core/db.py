@@ -184,12 +184,20 @@ def create_test_sqlite_engine(
     and initializes all database tables.
     """
     if sqlite_path == ":memory:" or sqlite_path is None:
-        engine = create_engine("sqlite:///:memory:")
+        from sqlalchemy.pool import StaticPool
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool
+        )
     else:
         path_str = str(sqlite_path)
         if not path_str.endswith(".s3db") and not path_str.endswith(".s2db"):
             path_str = f"{path_str}.s3db"
-        engine = create_engine(f"sqlite:///{path_str}")
+        engine = create_engine(
+            f"sqlite:///{path_str}",
+            connect_args={"check_same_thread": False}
+        )
     
     if initialize_schema:
         create_all_tables(engine)
