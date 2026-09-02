@@ -1,5 +1,5 @@
 """
-Portfolio Risk & Volatility Analytics Dashboard (Main Entrypoint).
+Portfolio Risk Analytics Dashboard (Main Entrypoint).
 Interactive web application powered by Streamlit, Plotly, and SQLAlchemy.
 """
 
@@ -30,7 +30,7 @@ from src.ui.tab_transactions import render_tab_transactions
 # 1. Page Configuration
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title=config.ui_config.get("app_title", "Portfolio Risk & Volatility Analytics"),
+    page_title=config.ui_config.get("app_title", "Portfolio Risk Analytics"),
     page_icon=config.ui_config.get("app_icon", "📈"),
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -139,7 +139,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 # 4. Main Application Layout & Tabs
 # -----------------------------------------------------------------------------
-st.title("📈 Portfolio Risk & Volatility Analytics")
+st.title("📈 Portfolio Risk Analytics")
 st.markdown("Interactive quantitative risk suite for rolling volatilities, tail risk percentiles, and return distribution modeling.")
 
 # Load core data for selected database

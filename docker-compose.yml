@@ -49,7 +49,7 @@ services:
       - dask-scheduler
 
   # ---------------------------------------------------------------------------
-  # 3. Streamlit Risk & Volatility Analytics Dashboard (Production - stocks)
+  # 3. Streamlit Risk Analytics Dashboard (Production - stocks)
   # ---------------------------------------------------------------------------
   risk-dashboard:
     build:
@@ -70,7 +70,7 @@ services:
       - "8501:8501"
 
   # ---------------------------------------------------------------------------
-  # 4. Streamlit Risk & Volatility Analytics Dashboard (Development - stocks_dev)
+  # 4. Streamlit Risk Analytics Dashboard (Development - stocks_dev)
   # ---------------------------------------------------------------------------
   risk-dashboard-dev:
     build:

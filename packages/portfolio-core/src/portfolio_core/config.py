@@ -194,7 +194,7 @@ class AppConfig:
     @property
     def ui_config(self) -> Dict[str, Any]:
         return self._cfg.get("ui", {
-            "app_title": "Portfolio Risk & Volatility Analytics",
+            "app_title": "Portfolio Risk Analytics",
             "app_icon": "📈",
             "theme": "light",
             "initial_sidebar_state": "collapsed"
