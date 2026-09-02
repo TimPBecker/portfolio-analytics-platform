@@ -61,13 +61,12 @@ pip install -r apps/dashboard/requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env with your MariaDB database credentials and Telegram bot keys:
-# DB_HOST=192.168.178.40
-# DB_PORT=3306
-# DB_USER=stocks
-# DB_PASSWORD=your_password
-# DB_NAME=stocks
+# Edit .env with your secrets (database password and optional Telegram bot token):
+# DB_PASSWORD=your_db_password_here
+# TELEGRAM_BOT_TOKEN=your_telegram_bot_token_optional
 ```
+
+> **Note:** Non-sensitive database settings (host, port, user, default database, available databases) and risk model parameters are configured in `apps/pipeline/config.yaml` and `apps/dashboard/config.yaml`. Any values in `.env` (such as `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_NAME`, `DB_DATABASES`) can also be used as environment variable overrides.
 
 ---
 
@@ -82,13 +81,13 @@ pytest -v
 Run tests for a specific component:
 
 ```bash
-# Test shared analytics & database core (12 tests)
+# Test shared analytics & database core (28 tests)
 pytest -v packages/portfolio-core/tests
 
 # Test Dagster reporting module (21 tests)
 pytest -v apps/pipeline/tests
 
-# Test Dashboard integration (2 tests)
+# Test Dashboard integration (10 tests)
 pytest -v apps/dashboard/tests
 ```
 
