@@ -82,7 +82,7 @@ def render_tab_portfolio(
     # -------------------------------------------------------------------------
     # 1. Valuation KPIs at the Top: Current Value & Previous Value (Stock Holdings Only)
     # -------------------------------------------------------------------------
-    pv_df = fetch_portfolio_values_history(days=365, asof_date=asof_date, engine=engine)
+    pv_df = fetch_portfolio_values_history(days=None, asof_date=asof_date, engine=engine)
 
     if not pv_df.empty and len(pv_df) >= 1:
         curr_row = pv_df.iloc[-1]
@@ -273,18 +273,75 @@ def render_tab_portfolio(
     # -------------------------------------------------------------------------
     # 4. Historical Portfolio Valuation Timeline
     # -------------------------------------------------------------------------
-    st.markdown("#### 📈 Portfolio Valuation Trajectory")
+    col_chart_title, col_chart_ctrl = st.columns([2.6, 1.4])
+    with col_chart_title:
+        st.markdown("#### 📈 Portfolio Valuation Trajectory")
+        st.caption("Historical valuation trajectory of stock holdings over time.")
+    with col_chart_ctrl:
+        history_choice = st.selectbox(
+            "Select History Horizon:",
+            options=["All", "1 Month", "3 Months", "6 Months", "1 Year"],
+            index=0,
+            key="tab_portfolio_history_horizon",
+            help="Filter the valuation history chart by time horizon."
+        )
 
-    if not pv_df.empty and len(pv_df) > 1:
+    # Determine valuation history source: database records or dynamic calculation from prices
+    chart_data = None
+    if not pv_df.empty and len(pv_df) >= 1:
         pv_df_sorted = pv_df.sort_values("DATE").reset_index(drop=True)
-        stocks_series = pv_df_sorted["STOCKS"] if "STOCKS" in pv_df_sorted.columns else pv_df_sorted["TOTAL_VALUE"]
+        chart_data = pd.DataFrame({
+            "DATE": pd.to_datetime(pv_df_sorted["DATE"]),
+            "STOCKS": pv_df_sorted["STOCKS"] if "STOCKS" in pv_df_sorted.columns else pv_df_sorted["TOTAL_VALUE"]
+        })
+    elif not active_prices.empty and active_pos:
+        valid_cols = [t for t in active_pos if t in active_prices.columns]
+        if valid_cols:
+            sh_series = pd.Series({t: active_pos[t] for t in valid_cols})
+            computed_stocks = active_prices[valid_cols].dot(sh_series)
+            chart_data = pd.DataFrame({
+                "DATE": pd.to_datetime(active_prices.index),
+                "STOCKS": computed_stocks.values
+            })
+
+    if chart_data is not None and not chart_data.empty:
+        chart_data = chart_data.sort_values("DATE").reset_index(drop=True)
+        max_date = chart_data["DATE"].max()
+
+        if "1 Month" in history_choice or "1 month" in history_choice.lower() or history_choice == "1M":
+            start_date = max_date - pd.DateOffset(months=1)
+        elif "3 Month" in history_choice or "3month" in history_choice.lower() or history_choice == "3M":
+            start_date = max_date - pd.DateOffset(months=3)
+        elif "6 Month" in history_choice or "6month" in history_choice.lower() or history_choice == "6M":
+            start_date = max_date - pd.DateOffset(months=6)
+        elif "1 Year" in history_choice or "1Y" in history_choice or "1 year" in history_choice.lower():
+            start_date = max_date - pd.DateOffset(years=1)
+        else:
+            start_date = chart_data["DATE"].min()
+
+        filtered_chart_data = chart_data[chart_data["DATE"] >= start_date].copy()
+        if filtered_chart_data.empty:
+            filtered_chart_data = chart_data.tail(1)
+
+        # Calculate dynamic y-axis framing for the selected time horizon
+        y_vals = filtered_chart_data["STOCKS"].dropna()
+        if not y_vals.empty:
+            y_min = float(y_vals.min())
+            y_max = float(y_vals.max())
+            spread = y_max - y_min
+            y_pad = max(spread * 0.08, y_max * 0.02) if y_max > 0 else 100.0
+            y_range_min = max(0.0, y_min - y_pad)
+            y_range_max = y_max + y_pad
+        else:
+            y_range_min = None
+            y_range_max = None
 
         fig_pv = go.Figure()
 
         fig_pv.add_trace(
             go.Scatter(
-                x=pv_df_sorted["DATE"],
-                y=stocks_series,
+                x=filtered_chart_data["DATE"],
+                y=filtered_chart_data["STOCKS"],
                 name="Stock Holdings Value (£)",
                 line=dict(color="#1E3A8A", width=3.0),
                 fill="tozeroy",
@@ -295,12 +352,22 @@ def render_tab_portfolio(
 
         layout_pv = get_plotly_layout_defaults()
         layout_pv.update(dict(
-            title=dict(text="Stock Holdings Valuation History (£)", font=dict(size=14, color="#0F172A")),
+            title=dict(text=f"Stock Holdings Valuation History (£) — {history_choice}", font=dict(size=14, color="#0F172A")),
             height=380,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         ))
         fig_pv.update_layout(**layout_pv)
-        fig_pv.update_yaxes(title_text="Stock Value (£)", tickprefix="£")
+
+        if y_range_min is not None and y_range_max is not None:
+            fig_pv.update_yaxes(
+                title_text="Stock Value (£)",
+                tickprefix="£",
+                range=[y_range_min, y_range_max],
+                autorange=False
+            )
+        else:
+            fig_pv.update_yaxes(title_text="Stock Value (£)", tickprefix="£", autorange=True)
+
         st.plotly_chart(fig_pv, use_container_width=True)
     else:
         st.info("No historical portfolio valuation data available.")

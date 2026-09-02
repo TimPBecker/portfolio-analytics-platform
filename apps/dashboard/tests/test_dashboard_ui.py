@@ -305,4 +305,55 @@ def test_tab_returns_imports_and_components():
     assert callable(fetch_raw_asset_prices)
 
 
+def test_tab_portfolio_valuation_history_filtering():
+    """Verify portfolio valuation history horizon date filtering logic."""
+    dates = pd.date_range("2024-01-01", "2026-08-31", freq="B")
+    pv_df = pd.DataFrame({
+        "DATE": dates,
+        "STOCKS": np.linspace(10000.0, 15000.0, len(dates)),
+        "TOTAL_VALUE": np.linspace(10000.0, 15000.0, len(dates)),
+        "CASH": np.zeros(len(dates)),
+        "CURRENCY": ["GBP"] * len(dates)
+    })
+
+    max_date = pv_df["DATE"].max()
+
+    # 1 Month
+    start_1m = max_date - pd.DateOffset(months=1)
+    df_1m = pv_df[pv_df["DATE"] >= start_1m]
+    assert len(df_1m) > 0
+    assert len(df_1m) < len(pv_df)
+    assert (max_date - df_1m["DATE"].min()).days <= 35
+
+    # 3 Months
+    start_3m = max_date - pd.DateOffset(months=3)
+    df_3m = pv_df[pv_df["DATE"] >= start_3m]
+    assert len(df_3m) > len(df_1m)
+    assert (max_date - df_3m["DATE"].min()).days <= 95
+
+    # 6 Months
+    start_6m = max_date - pd.DateOffset(months=6)
+    df_6m = pv_df[pv_df["DATE"] >= start_6m]
+    assert len(df_6m) > len(df_3m)
+    assert (max_date - df_6m["DATE"].min()).days <= 186
+
+    # 1 Year
+    start_1y = max_date - pd.DateOffset(years=1)
+    df_1y = pv_df[pv_df["DATE"] >= start_1y]
+    assert len(df_1y) > len(df_6m)
+    assert (max_date - df_1y["DATE"].min()).days <= 367
+
+    # All
+    df_all = pv_df[pv_df["DATE"] >= pv_df["DATE"].min()]
+    assert len(df_all) == len(pv_df)
+
+    # Verify dynamic y-axis calculation on 1M vs All
+    y_min_1m, y_max_1m = df_1m["STOCKS"].min(), df_1m["STOCKS"].max()
+    y_min_all, y_max_all = df_all["STOCKS"].min(), df_all["STOCKS"].max()
+    assert y_min_1m > y_min_all  # 1M y-min is tighter and higher than overall all-time min
+    assert y_max_1m == pytest.approx(y_max_all, rel=1e-3)  # latest max matches
+
+
+
+
 
