@@ -25,13 +25,19 @@ from portfolio_core.db import (
     fetch_stored_scenario_pnl,
     fetch_available_var_dates
 )
-from src.ui.theme import PALETTE, get_plotly_layout_defaults
+from sqlalchemy.engine import Engine
+
+try:
+    from src.ui.theme import PALETTE, get_plotly_layout_defaults
+except ImportError:
+    from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
 
 
 def render_tab_var(
     prices_gbp: pd.DataFrame,
     positions: Dict[str, float],
-    asof_date: Optional[str] = None
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None
 ):
     """Renders the Value-at-Risk and Risk Attribution view."""
     st.markdown("### 🛡️ Value-at-Risk (VaR) & Percentile Spectrum")
@@ -46,7 +52,7 @@ def render_tab_var(
     # -------------------------------------------------------------------------
     col_c1, col_c2, col_c3 = st.columns([1.5, 1.2, 1.3])
 
-    available_dates = fetch_available_var_dates()
+    available_dates = fetch_available_var_dates(engine=engine)
     default_asof = asof_date or (available_dates[0] if available_dates else str(prices_gbp.index[-1])[:10])
 
     with col_c1:
@@ -66,7 +72,7 @@ def render_tab_var(
     # -------------------------------------------------------------------------
     # 2. Database-First VaR Spectrum Loading (Default: PORTFOLIO_VAR)
     # -------------------------------------------------------------------------
-    stored_var_df = fetch_stored_var_metrics(asof_date=selected_asof)
+    stored_var_df = fetch_stored_var_metrics(asof_date=selected_asof, engine=engine)
 
     if not stored_var_df.empty:
         # --- PATH A: Materialized Database Records (No recalculation) ---
@@ -82,7 +88,7 @@ def render_tab_var(
         var_data_source = "🟢 Database Records (`PORTFOLIO_VAR`)"
 
         # Fetch materialized scenario PnL from DB
-        scenario_pnl_df = fetch_stored_scenario_pnl(asof_date=selected_asof)
+        scenario_pnl_df = fetch_stored_scenario_pnl(asof_date=selected_asof, engine=engine)
         if scenario_pnl_df.empty:
             _, scenario_pnl_df, _ = compute_multi_model_var_spectrum(
                 price_history=prices_gbp, positions=positions, asof_date=selected_asof, lookback_days=lookback_days
@@ -248,7 +254,7 @@ def render_tab_var(
         )
 
     # Check database for stored component risk contributions
-    stored_risk_df = fetch_stored_risk_contributions(asof_date=selected_asof, confidence_level=target_cl)
+    stored_risk_df = fetch_stored_risk_contributions(asof_date=selected_asof, confidence_level=target_cl, engine=engine)
 
     # --- Mode A: Shapley Risk Contributions (Default) ---
     if "Shapley" in component_metric_choice:

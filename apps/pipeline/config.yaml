@@ -21,6 +21,8 @@ resources:
       port: 3306
       user: "stocks"
       database: "stocks"
+      databases:
+        - "stocks"
       # Password secret is read from DB_PASSWORD in .env
 
       # --- SQLite Configuration (Commented out template) ---

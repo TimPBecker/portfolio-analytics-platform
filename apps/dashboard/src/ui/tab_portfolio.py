@@ -13,6 +13,8 @@ from portfolio_core.db import (
 )
 from portfolio_core.analytics.statistics import compute_top_position_movers
 
+from sqlalchemy.engine import Engine
+
 try:
     from src.ui.theme import PALETTE, get_plotly_layout_defaults
     from src.services.report_generator import generate_portfolio_pdf_report
@@ -24,11 +26,13 @@ except ImportError:
 def render_tab_portfolio(
     prices_gbp: pd.DataFrame,
     positions: Dict[str, float],
-    asof_date: Optional[str] = None
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None,
+    db_name: Optional[str] = None
 ):
     """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view with PDF Export."""
     def _create_report_bytes() -> bytes:
-        ok, path, pdf_bytes, err = generate_portfolio_pdf_report(asof_date=asof_date)
+        ok, path, pdf_bytes, err = generate_portfolio_pdf_report(asof_date=asof_date, db_name=db_name)
         if ok and pdf_bytes:
             return pdf_bytes
         st.error(f"Failed to generate PDF report: {err}")
@@ -78,7 +82,7 @@ def render_tab_portfolio(
     # -------------------------------------------------------------------------
     # 1. Valuation KPIs at the Top: Current Value & Previous Value (Stock Holdings Only)
     # -------------------------------------------------------------------------
-    pv_df = fetch_portfolio_values_history(days=365, asof_date=asof_date)
+    pv_df = fetch_portfolio_values_history(days=365, asof_date=asof_date, engine=engine)
 
     if not pv_df.empty and len(pv_df) >= 1:
         curr_row = pv_df.iloc[-1]

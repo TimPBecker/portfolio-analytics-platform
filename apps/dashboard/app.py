@@ -3,11 +3,12 @@ Portfolio Risk & Volatility Analytics Dashboard (Main Entrypoint).
 Interactive web application powered by Streamlit, Plotly, and SQLAlchemy.
 """
 
+import os
 import streamlit as st
 import pandas as pd
 from typing import Dict, List, Tuple
 
-from portfolio_core.config import config
+from portfolio_core.config import config, is_dev_environment
 from portfolio_core.db import (
     get_engine,
     test_db_connection,
@@ -44,36 +45,78 @@ ensure_sidebar_collapsed()
 # 2. Cached Data Loaders
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
-def load_cached_data() -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
-    """Loads and caches market prices, tickers, positions, and risk dates."""
-    engine = get_engine()
-    tickers = fetch_available_tickers(engine)
+def load_cached_data(db_name: str) -> Tuple[pd.DataFrame, List[str], Dict[str, float], List[str]]:
+    """Loads and caches market prices, tickers, positions, and risk dates for the specified database."""
+    engine = get_engine(database=db_name)
+    tickers = fetch_available_tickers(engine=engine)
     prices_gbp = fetch_historical_prices_gbp(engine=engine)
     positions = fetch_portfolio_positions(engine=engine)
-    var_dates = fetch_available_var_dates(engine)
+    var_dates = fetch_available_var_dates(engine=engine)
     return prices_gbp, tickers, positions, var_dates
 
 
 # -----------------------------------------------------------------------------
-# 3. Sidebar: Database Status & Application Metadata
+# 3. Sidebar: Database Status, Selection & Application Metadata
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 📈 Risk Analytics")
     st.caption("Quantitative Portfolio Risk, Volatility & Return Modeling")
     st.divider()
 
-    # DB Connection Status Check
-    db_connected, db_msg = test_db_connection()
-    if db_connected:
-        st.success("🟢 Database Connected")
+    # Database Selection Dropdown
+    st.markdown("### 🗄️ Database")
+    is_dev = is_dev_environment()
+    db_cfg = config.db_config
+    configured_dbs = db_cfg.get("databases", ["stocks_dev" if is_dev else "stocks"])
+    if not isinstance(configured_dbs, list):
+        configured_dbs = [configured_dbs]
+
+    if is_dev:
+        # Strictly filter to databases ending with _dev
+        configured_dbs = [d for d in configured_dbs if d.endswith("_dev")]
+        if not configured_dbs:
+            configured_dbs = ["stocks_dev"]
+
+    # Active default database: check environment variable DB_NAME, then config default
+    default_db = os.getenv("DB_NAME") or db_cfg.get("database", "stocks_dev" if is_dev else "stocks")
+    if is_dev and not default_db.endswith("_dev"):
+        default_db = f"{default_db}_dev"
+
+    # Ensure default_db is present in options list
+    if default_db in configured_dbs:
+        db_options = configured_dbs
+        default_index = configured_dbs.index(default_db)
     else:
-        st.error(f"🔴 DB Connection Failed: {db_msg}")
+        db_options = [default_db] + [d for d in configured_dbs if d != default_db]
+        default_index = 0
+
+    selected_db = st.selectbox(
+        "Active Database:",
+        options=db_options,
+        index=default_index,
+        help="Select the database to query and manage. In development mode, only databases ending in '_dev' are permitted."
+    )
+
+    if is_dev:
+        st.caption("🔒 Dev Mode: Restricted strictly to `*_dev` databases.")
+        if not selected_db.endswith("_dev"):
+            st.error(f"🚫 Security Restriction: In development mode, connections to non-dev database '{selected_db}' are blocked.")
+            st.stop()
+
+    # Active DB Engine
+    active_engine = get_engine(database=selected_db)
+
+    # DB Connection Status Check
+    db_connected, db_msg = test_db_connection(engine=active_engine)
+    if db_connected:
+        st.success(f"🟢 Connected to `{selected_db}`")
+    else:
+        st.error(f"🔴 DB Connection Failed (`{selected_db}`): {db_msg}")
 
     st.markdown("### ⚙️ Environment Details")
-    db_cfg = config.db_config
     st.markdown(f"- **DB Backend:** `{db_cfg.get('type', 'mariadb')}`")
     st.markdown(f"- **Host:** `{db_cfg.get('host', 'local')}`")
-    st.markdown(f"- **Database:** `{db_cfg.get('database', 'stocks')}`")
+    st.markdown(f"- **Database:** `{selected_db}`")
 
     # Refresh Data Cache Button
     if st.button("🔄 Refresh Data Cache", use_container_width=True):
@@ -99,12 +142,12 @@ with st.sidebar:
 st.title("📈 Portfolio Risk & Volatility Analytics")
 st.markdown("Interactive quantitative risk suite for rolling volatilities, tail risk percentiles, and return distribution modeling.")
 
-# Load core data
-with st.spinner("Connecting to database and loading market data..."):
-    prices_gbp, available_tickers, positions, var_dates = load_cached_data()
+# Load core data for selected database
+with st.spinner(f"Connecting to database '{selected_db}' and loading market data..."):
+    prices_gbp, available_tickers, positions, var_dates = load_cached_data(selected_db)
 
 if prices_gbp.empty:
-    st.error("No historical market price data found. Please ensure the database is accessible and populated.")
+    st.error(f"No historical market price data found in database '{selected_db}'. Please ensure the database is accessible and populated.")
     st.stop()
 
 # Header status strip
@@ -133,26 +176,31 @@ with tab1:
     render_tab_portfolio(
         prices_gbp=prices_gbp,
         positions=positions,
-        asof_date=latest_date_str
+        asof_date=latest_date_str,
+        engine=active_engine,
+        db_name=selected_db
     )
 
 with tab2:
     render_tab_benchmarks(
         prices_gbp=prices_gbp,
-        asof_date=latest_date_str
+        asof_date=latest_date_str,
+        engine=active_engine
     )
 
 with tab3:
     render_tab_var(
         prices_gbp=prices_gbp,
         positions=positions,
-        asof_date=latest_date_str
+        asof_date=latest_date_str,
+        engine=active_engine
     )
 
 with tab4:
     render_tab_returns(
         prices_gbp=prices_gbp,
-        available_tickers=available_tickers
+        available_tickers=available_tickers,
+        engine=active_engine
     )
 
 with tab5:
@@ -162,4 +210,6 @@ with tab5:
     )
 
 with tab6:
-    render_tab_transactions()
+    render_tab_transactions(
+        engine=active_engine
+    )

@@ -272,3 +272,25 @@ def test_quarto_typst_pdf_report_generation():
     assert len(pdf_bytes) > 1000
     assert pdf_bytes[:5] == b"%PDF-"
 
+
+def test_dashboard_databases_config_and_options():
+    """Verify that dashboard config defines databases defaulting to stocks and allows multi-db options."""
+    from portfolio_core.config import load_config, get_db_config
+
+    cfg = load_config()
+    db_cfg = get_db_config(cfg, is_test=False, is_dev=False)
+    assert "databases" in db_cfg
+    assert "stocks" in db_cfg["databases"]
+
+    # Verify custom databases list parsing
+    custom_cfg = {
+        "db": {
+            "type": "mariadb",
+            "database": "stocks",
+            "databases": ["stocks", "stocks_dev", "stocks_sim"]
+        }
+    }
+    resolved = get_db_config(custom_cfg, is_test=False, is_dev=False)
+    assert resolved["databases"] == ["stocks", "stocks_dev", "stocks_sim"]
+
+

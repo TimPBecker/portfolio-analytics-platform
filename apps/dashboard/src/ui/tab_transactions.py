@@ -22,18 +22,20 @@ from portfolio_core.db import (
     calculate_and_store_daily_benchmark_values
 )
 
+from sqlalchemy.engine import Engine
+
 try:
     from src.ui.theme import PALETTE, get_plotly_layout_defaults
 except ImportError:
     from apps.dashboard.src.ui.theme import PALETTE, get_plotly_layout_defaults
 
 
-def render_tab_transactions():
+def render_tab_transactions(engine: Optional[Engine] = None):
     """Renders the Transaction Management and Trade Entry interface."""
     st.markdown("### 📝 Record Portfolio Transactions")
     st.caption("Enter new stock trade transactions into the database with real-time Yahoo Finance price lookup and automatic ID incrementation.")
 
-    engine = get_engine()
+    engine = engine or get_engine()
 
     # -------------------------------------------------------------------------
     # 1. Transaction Entry Form & Yahoo Price Preview
