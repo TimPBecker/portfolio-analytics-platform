@@ -307,17 +307,15 @@ def test_tab_returns_imports_and_components():
 
 def test_load_cached_data_parallel():
     """Verify concurrent parallel data prefetching bundle structure."""
-    from sqlalchemy import create_engine
-    from portfolio_core.db import create_all_tables
+    from portfolio_core.db import create_test_sqlite_engine
 
     try:
         from app import load_cached_data_parallel, load_cached_data
     except ImportError:
         from apps.dashboard.app import load_cached_data_parallel, load_cached_data
 
-    # Use isolated SQLite test engine so the test executes deterministically without external credentials
-    test_engine = create_engine("sqlite:///:memory:")
-    create_all_tables(test_engine)
+    # Use isolated thread-safe SQLite test engine with initialized schema
+    test_engine = create_test_sqlite_engine(sqlite_path=":memory:", initialize_schema=True)
 
     # Execute parallel prefetch on test engine
     bundle = load_cached_data_parallel("stocks_dev", _engine=test_engine)
