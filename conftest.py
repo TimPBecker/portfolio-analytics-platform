@@ -6,6 +6,7 @@ Guarantees automatic cleanup and deletion of any on-disk test SQLite files (.s3d
 """
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 import pytest
 from sqlalchemy import Engine, text
@@ -53,7 +54,7 @@ def strictly_dev_db_guard(monkeypatch):
 
 
 @pytest.fixture
-def sqlite_test_engine() -> Engine:
+def sqlite_test_engine() -> Iterator[Engine]:
     """Provides an isolated on-demand in-memory SQLite database with all tables initialized."""
     engine = create_test_sqlite_engine(sqlite_path=":memory:", initialize_schema=True)
     yield engine
@@ -61,7 +62,7 @@ def sqlite_test_engine() -> Engine:
 
 
 @pytest.fixture
-def temp_sqlite_file_engine(tmp_path) -> Engine:
+def temp_sqlite_file_engine(tmp_path) -> Iterator[tuple[Engine, str]]:
     """
     Provides a file-backed on-demand SQLite database (.s3db / .s2db) in a temporary directory,
     ensuring engine disposal and complete file deletion upon test completion.
@@ -75,7 +76,7 @@ def temp_sqlite_file_engine(tmp_path) -> Engine:
 
 
 @pytest.fixture
-def mariadb_dev_engine() -> Engine:
+def mariadb_dev_engine() -> Iterator[Engine]:
     """
     Provides a MariaDB Engine strictly connected to the dev database ('stocks_dev').
     Skips if remote MariaDB dev database is unreachable.
@@ -95,7 +96,7 @@ def mariadb_dev_engine() -> Engine:
 
 
 @pytest.fixture
-def test_engine() -> Engine:
+def test_engine() -> Iterator[Engine]:
     """
     Provides the primary test database engine (MariaDB dev or on-demand SQLite fallback).
     Guarantees strict dev isolation and clean teardown.
