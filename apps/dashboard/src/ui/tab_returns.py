@@ -18,6 +18,7 @@ from portfolio_core.analytics.statistics import (
     generate_density_curves,
     compute_qq_plot_data
 )
+from portfolio_core.db import fetch_raw_asset_prices
 from sqlalchemy.engine import Engine
 
 try:
