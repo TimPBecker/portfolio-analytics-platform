@@ -347,6 +347,13 @@ def test_tab_portfolio_valuation_history_filtering():
     df_all = pv_df[pv_df["DATE"] >= pv_df["DATE"].min()]
     assert len(df_all) == len(pv_df)
 
+    # Verify dynamic y-axis calculation on 1M vs All
+    y_min_1m, y_max_1m = df_1m["STOCKS"].min(), df_1m["STOCKS"].max()
+    y_min_all, y_max_all = df_all["STOCKS"].min(), df_all["STOCKS"].max()
+    assert y_min_1m > y_min_all  # 1M y-min is tighter and higher than overall all-time min
+    assert y_max_1m == pytest.approx(y_max_all, rel=1e-3)  # latest max matches
+
+
 
 
 

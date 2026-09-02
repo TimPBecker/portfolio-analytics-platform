@@ -323,6 +323,19 @@ def render_tab_portfolio(
         if filtered_chart_data.empty:
             filtered_chart_data = chart_data.tail(1)
 
+        # Calculate dynamic y-axis framing for the selected time horizon
+        y_vals = filtered_chart_data["STOCKS"].dropna()
+        if not y_vals.empty:
+            y_min = float(y_vals.min())
+            y_max = float(y_vals.max())
+            spread = y_max - y_min
+            y_pad = max(spread * 0.08, y_max * 0.02) if y_max > 0 else 100.0
+            y_range_min = max(0.0, y_min - y_pad)
+            y_range_max = y_max + y_pad
+        else:
+            y_range_min = None
+            y_range_max = None
+
         fig_pv = go.Figure()
 
         fig_pv.add_trace(
@@ -344,7 +357,17 @@ def render_tab_portfolio(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         ))
         fig_pv.update_layout(**layout_pv)
-        fig_pv.update_yaxes(title_text="Stock Value (£)", tickprefix="£")
+
+        if y_range_min is not None and y_range_max is not None:
+            fig_pv.update_yaxes(
+                title_text="Stock Value (£)",
+                tickprefix="£",
+                range=[y_range_min, y_range_max],
+                autorange=False
+            )
+        else:
+            fig_pv.update_yaxes(title_text="Stock Value (£)", tickprefix="£", autorange=True)
+
         st.plotly_chart(fig_pv, use_container_width=True)
     else:
         st.info("No historical portfolio valuation data available.")
