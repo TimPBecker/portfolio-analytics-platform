@@ -1,0 +1,6 @@
+# Lines starting with '#' are comments.
+# Each line is a file pattern followed by one or more owners using @username or team handles.
+# Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Set @TimPBecker as default code owner for the entire repository.
+* @TimPBecker
