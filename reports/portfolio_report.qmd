@@ -116,20 +116,58 @@ Executive summary of overall portfolio valuation, stock equity holdings, and acc
 ```{python}
 #| echo: false
 #| warning: false
+#| output: asis
 
-summary_data = [
-    ["Valuation As-Of Date", report_date_str],
-    ["Portfolio Inception Date", inception_date_str],
-    ["Total Portfolio Valuation", f"£{total_val:,.2f} GBP"],
-    ["Stock Holdings Valuation", f"£{stocks_val:,.2f} GBP ({ (stocks_val/total_val*100) if total_val else 0:.1f}%)"],
-    ["Dividend Cash Buffer", f"£{cash_val:,.2f} GBP ({ (cash_val/total_val*100) if total_val else 0:.1f}%)"],
-    ["Active Stock Holdings", f"{len(positions)} positions"],
-    ["Day-over-Day Value Change", f"{'+' if day_diff > 0 else ''}£{day_diff:,.2f} ({'+' if day_diff_pct > 0 else ''}{day_diff_pct:.2f}%)"],
-    ["Total Return Since Inception", f"{'+' if total_return_pct > 0 else ''}{total_return_pct:.2f}%"]
+day_color = "#059669" if day_diff > 0 else ("#DC2626" if day_diff < 0 else "#64748B")
+ret_color = "#059669" if total_return_pct > 0 else ("#DC2626" if total_return_pct < 0 else "#64748B")
+
+day_str = f"+£{day_diff:,.2f}" if day_diff > 0 else (f"-£{abs(day_diff):,.2f}" if day_diff < 0 else "£0.00")
+day_pct_str = f"+{day_diff_pct:.2f}%" if day_diff_pct > 0 else f"{day_diff_pct:.2f}%"
+ret_str = f"+{total_return_pct:.2f}%" if total_return_pct > 0 else f"{total_return_pct:.2f}%"
+
+stocks_pct = (stocks_val / total_val * 100.0) if total_val else 0.0
+cash_pct = (cash_val / total_val * 100.0) if total_val else 0.0
+
+typst_table = f"""```{{=typst}}
+#align(center)[
+#block(
+  width: 100%,
+  stroke: 0.6pt + rgb("#CBD5E1"),
+  radius: 4pt,
+  clip: true,
+)[
+#table(
+  columns: (1.35fr, 1.15fr, 1.35fr, 1.15fr),
+  stroke: (x, y) => if y == 0 {{ none }} else {{ (top: 0.5pt + rgb("#E2E8F0")) }},
+  fill: (col, row) => if row == 0 {{
+    rgb("#1E3A8A")
+  }} else if calc.odd(row) {{
+    rgb("#F8FAFC")
+  }} else {{
+    rgb("#FFFFFF")
+  }},
+  inset: (x: 8pt, y: 5.5pt),
+  align: (col, row) => if calc.odd(col) {{ right + horizon }} else {{ left + horizon }},
+  table.header(
+    text(fill: white, weight: "bold", size: 9pt)[Portfolio Metric],
+    text(fill: white, weight: "bold", size: 9pt)[Value],
+    text(fill: white, weight: "bold", size: 9pt)[Performance Metric],
+    text(fill: white, weight: "bold", size: 9pt)[Value],
+  ),
+  [Valuation As-Of Date], [*{report_date_str}*],
+  [Day-over-Day Value Change], text(weight: "bold", fill: rgb("{day_color}"))[{day_str} ({day_pct_str})],
+  [Total Portfolio Valuation], text(weight: "bold", fill: rgb("#0F172A"))[£{total_val:,.2f} GBP],
+  [Total Return Since Inception], text(weight: "bold", fill: rgb("{ret_color}"))[{ret_str}],
+  [Stock Holdings Valuation], [£{stocks_val:,.2f} ({stocks_pct:.1f}%)],
+  [Portfolio Inception Date], [{inception_date_str}],
+  [Dividend Cash Buffer], [£{cash_val:,.2f} ({cash_pct:.1f}%)],
+  [Active Stock Holdings], [{len(positions)} positions],
+)
 ]
+]
+```"""
 
-summary_df = pd.DataFrame(summary_data, columns=["Key Metric", "Value"])
-print(summary_df.to_markdown(index=False))
+print(typst_table)
 ```
 
 ```{python}
@@ -170,6 +208,8 @@ if not pv_df.empty:
     plt.tight_layout()
     plt.show()
 ```
+
+{{< pagebreak >}}
 
 # Stock Holdings & Asset Allocation
 
@@ -264,6 +304,8 @@ if not movers_df.empty:
     plt.show()
 ```
 
+{{< pagebreak >}}
+
 # Benchmarking & Comparative Performance
 
 Visual comparison of portfolio growth against standard benchmark indices and custom multi-asset blends. Benchmarks reflect exact GBP trade matching and accumulated constituent dividend accounts.
@@ -349,6 +391,8 @@ if not bm_values_df.empty and not pv_df.empty:
     plt.show()
 ```
 
+{{< pagebreak >}}
+
 # Rolling Volatility & Regime Dynamics
 
 Dynamic time-series comparison of RiskMetrics EWMA ($\lambda=0.94$) and rolling sample volatility estimators.
@@ -394,6 +438,8 @@ if not prices_gbp.empty and positions:
     plt.tight_layout()
     plt.show()
 ```
+
+{{< pagebreak >}}
 
 # Value-at-Risk (VaR) & Tail Risk Spectrum
 
@@ -486,6 +532,8 @@ if not sc_df.empty and "HISTORICAL_PNL" in sc_df.columns:
     plt.show()
 ```
 
+{{< pagebreak >}}
+
 # Shapley Additive Risk Attribution
 
 Decomposition of portfolio Value-at-Risk across constituent assets highlighting marginal risk contributions and diversification benefits.
@@ -535,6 +583,8 @@ if not rc_df.empty:
     plt.tight_layout()
     plt.show()
 ```
+
+{{< pagebreak >}}
 
 # Statistical & Return Distribution Diagnostics
 
