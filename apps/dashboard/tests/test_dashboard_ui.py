@@ -387,5 +387,125 @@ def test_tab_portfolio_valuation_history_filtering():
     assert y_max_1m == pytest.approx(y_max_all, rel=1e-3)
 
 
+def test_tab_portfolio_pv_decomposition_and_ecdf():
+    """
+    Tests that:
+    1. Day-over-day PV change decomposes exactly into Clean P&L + New Trades Value Impact.
+    2. Both Historical Simulation and Vol-Scaled Historical Simulation eCDF values are computed.
+    3. Both PPLs and PV are based on the identical baseline portfolio snapshot.
+    """
+    from portfolio_core.analytics.var import (
+        HistoricalVaR,
+        VolatilityScaledVaR,
+        EWMAVolatility,
+        calculate_clean_pnl,
+        empiricalCDF,
+        EmpiricalCDFResult
+    )
+
+    dates = pd.date_range("2025-01-01", periods=100, freq="B")
+    np.random.seed(42)
+    prices_df = pd.DataFrame({
+        "NVDA": 100.0 * np.exp(np.cumsum(np.random.normal(0.001, 0.02, 100))),
+        "STAN.L": 20.0 * np.exp(np.cumsum(np.random.normal(0.0005, 0.015, 100))),
+        "AAPL": 150.0 * np.exp(np.cumsum(np.random.normal(0.0008, 0.018, 100)))
+    }, index=dates)
+
+    # Holdings at t-1: 50 NVDA, 200 STAN.L, 0 AAPL
+    pos_prev = {"NVDA": 50.0, "STAN.L": 200.0}
+    # Holdings at t (bought 20 AAPL and sold 10 NVDA): 40 NVDA, 200 STAN.L, 20 AAPL
+    pos_curr = {"NVDA": 40.0, "STAN.L": 200.0, "AAPL": 20.0}
+
+    p_prev = prices_df.iloc[-2]
+    p_curr = prices_df.iloc[-1]
+
+    # Baseline PV at t-1
+    pv_prev = sum(pos_prev[t] * float(p_prev[t]) for t in pos_prev)
+    # Current PV at t
+    pv_curr = sum(pos_curr[t] * float(p_curr[t]) for t in pos_curr)
+    total_pv_change = pv_curr - pv_prev
+
+    # Clean P&L on baseline holdings (zero position impact)
+    clean_pnl, baseline_calc = calculate_clean_pnl(pos_prev, p_prev, p_curr)
+    assert np.isclose(pv_prev, baseline_calc)
+
+    # Trade value impact: sum((shares_curr - shares_prev) * p_curr)
+    all_tickers = sorted(list(set(pos_curr.keys()) | set(pos_prev.keys())))
+    trade_val_change = sum((pos_curr.get(t, 0.0) - pos_prev.get(t, 0.0)) * float(p_curr[t]) for t in all_tickers)
+
+    # EXACT identity: Total PV Change == Clean P&L + Trade Value Change
+    assert np.isclose(total_pv_change, clean_pnl + trade_val_change)
+
+    # Simulate scenario distributions on the exact same baseline portfolio (pos_prev)
+    prices_up_to_prev = prices_df.iloc[:-1]
+    lookback = min(260, len(prices_up_to_prev) - 1)
+
+    # 1. Historical Simulation eCDF
+    m_hist = HistoricalVaR(confidence_level=0.95, horizon_days=1, lookback_days=lookback)
+    pnl_mat_hist, _, _ = m_hist.generate_scenario_pnl_matrix(pos_prev, prices_up_to_prev)
+    ppls_hist = pnl_mat_hist.sum(axis=1).values
+    res_hist = empiricalCDF(ppls_hist, clean_pnl, portfolio_value=pv_prev, return_details=True)
+
+    assert isinstance(res_hist, EmpiricalCDFResult)
+    assert 0.0 <= res_hist.cdf_value <= 1.0
+    assert np.isclose(res_hist.actual_pnl, clean_pnl)
+    assert np.isclose(res_hist.portfolio_value, pv_prev)
+
+    # 2. Vol-Scaled Simulation eCDF (EWMA lambda=0.94)
+    m_vol = VolatilityScaledVaR(volatility_estimator=EWMAVolatility(decay_factor=0.94), lookback_days=lookback)
+    pnl_mat_vol, _, _ = m_vol.generate_scenario_pnl_matrix(pos_prev, prices_up_to_prev)
+    ppls_vol = pnl_mat_vol.sum(axis=1).values
+    res_vol = empiricalCDF(ppls_vol, clean_pnl, portfolio_value=pv_prev, return_details=True)
+
+    assert isinstance(res_vol, EmpiricalCDFResult)
+    assert 0.0 <= res_vol.cdf_value <= 1.0
+    assert np.isclose(res_vol.actual_pnl, clean_pnl)
+
+
+def test_tab_backtesting_imports_and_pipeline():
+    """Tests that render_tab_backtesting and the backtesting diagnostics pipeline work properly."""
+    try:
+        from src.ui.tab_backtesting import render_tab_backtesting
+    except ImportError:
+        from apps.dashboard.src.ui.tab_backtesting import render_tab_backtesting
+
+    from portfolio_core.analytics.backtesting import (
+        generate_portfolio_backtest_timeline,
+        run_backtest_diagnostics
+    )
+
+    dates = pd.date_range("2025-01-01", periods=100, freq="B")
+    np.random.seed(42)
+    prices_df = pd.DataFrame({
+        "NVDA": 100.0 * np.exp(np.cumsum(np.random.normal(0.001, 0.02, 100))),
+        "STAN.L": 20.0 * np.exp(np.cumsum(np.random.normal(0.0005, 0.015, 100)))
+    }, index=dates)
+
+    positions = {"NVDA": 10.0, "STAN.L": 50.0}
+
+    # Generate timeline on mock prices
+    timeline = generate_portfolio_backtest_timeline(
+        positions=positions,
+        prices_gbp=prices_df,
+        backtest_days=40,
+        lookback_days=30,
+        confidence_level=0.95
+    )
+
+    assert not timeline.empty
+    assert len(timeline) == 40
+
+    # Diagnostic suite
+    diag = run_backtest_diagnostics(timeline, confidence_level=0.95, model_column_prefix="HIST")
+    assert diag["binomial"].observed_outliers >= 0
+    assert diag["kupiec_pof"].p_value >= 0.0
+    assert diag["independence"].is_independent_5pct in (True, False)
+    assert diag["uniformity"].sample_size == 40
+    assert hasattr(diag["uniformity"], "calibration_quality")
+    assert isinstance(diag["uniformity"].calibration_quality, str)
+
+
+
+
 
 
