@@ -265,3 +265,29 @@ def compute_top_position_movers(
     df = pd.DataFrame(rows)
     df = df.sort_values("ABS_DIFF_GBP", ascending=False).head(max(1, top_n)).reset_index(drop=True)
     return df
+
+
+# Re-export empirical CDF and clean P&L backtesting utilities
+from portfolio_core.analytics.var import (
+    EmpiricalCDFResult,
+    calculate_clean_pnl,
+    calculate_hypothetical_pnl,
+    empirical_cdf,
+    empiricalCDF,
+    compute_portfolio_empirical_cdf,
+)
+
+__all__ = [
+    "compute_asset_returns",
+    "compute_distribution_metrics",
+    "generate_density_curves",
+    "compute_qq_plot_data",
+    "compute_top_position_movers",
+    "EmpiricalCDFResult",
+    "calculate_clean_pnl",
+    "calculate_hypothetical_pnl",
+    "empirical_cdf",
+    "empiricalCDF",
+    "compute_portfolio_empirical_cdf",
+]
+

@@ -31,6 +31,7 @@ try:
     from src.ui.tab_portfolio import render_tab_portfolio
     from src.ui.tab_benchmarks import render_tab_benchmarks
     from src.ui.tab_transactions import render_tab_transactions
+    from src.ui.tab_backtesting import render_tab_backtesting
 except ImportError:
     from apps.dashboard.src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
     from apps.dashboard.src.ui.tab_volatility import render_tab_volatility
@@ -39,6 +40,8 @@ except ImportError:
     from apps.dashboard.src.ui.tab_portfolio import render_tab_portfolio
     from apps.dashboard.src.ui.tab_benchmarks import render_tab_benchmarks
     from apps.dashboard.src.ui.tab_transactions import render_tab_transactions
+    from apps.dashboard.src.ui.tab_backtesting import render_tab_backtesting
+
 
 
 # -----------------------------------------------------------------------------
@@ -249,10 +252,11 @@ def run_dashboard():
     st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
     # Main Navigation Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "💼 Portfolio Holdings & Valuation",
         "🎯 Benchmarking",
         "🛡️ Value-at-Risk Spectrum",
+        "🔬 VaR Backtesting",
         "📊 Levels, Returns & Histogram",
         "📈 Rolling Volatility",
         "📝 Transaction Entry"
@@ -287,6 +291,14 @@ def run_dashboard():
         )
 
     with tab4:
+        render_tab_backtesting(
+            prices_gbp=prices_gbp,
+            positions=positions,
+            asof_date=latest_date_str,
+            engine=active_engine
+        )
+
+    with tab5:
         render_tab_returns(
             prices_gbp=prices_gbp,
             available_tickers=available_tickers,
@@ -294,19 +306,20 @@ def run_dashboard():
             raw_prices_cache=raw_prices_cache
         )
 
-    with tab5:
+    with tab6:
         render_tab_volatility(
             prices_gbp=prices_gbp,
             available_tickers=available_tickers,
             raw_prices_cache=raw_prices_cache
         )
 
-    with tab6:
+    with tab7:
         render_tab_transactions(
             engine=active_engine,
             transactions_df=transactions_df,
             positions_dict=positions
         )
+
 
 
 if __name__ == "__main__":

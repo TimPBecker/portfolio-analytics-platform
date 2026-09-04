@@ -9,11 +9,20 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from portfolio_core.db import (
-    fetch_portfolio_values_history
+    fetch_portfolio_values_history,
+    fetch_portfolio_positions
 )
 from portfolio_core.analytics.statistics import compute_top_position_movers
+from portfolio_core.analytics.var import (
+    HistoricalVaR,
+    VolatilityScaledVaR,
+    EWMAVolatility,
+    calculate_clean_pnl,
+    empiricalCDF
+)
 
 from sqlalchemy.engine import Engine
+
 
 try:
     from src.ui.theme import PALETTE, get_plotly_layout_defaults
@@ -119,37 +128,220 @@ def render_tab_portfolio(
             diff_stocks_val = 0.0
             diff_stocks_pct = 0.0
 
-    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+    # -------------------------------------------------------------------------
+    # Position Reconstruction, Clean P&L & Trade Value Impact Breakdown
+    # -------------------------------------------------------------------------
+    pos_prev = None
+    if len(active_prices) >= 2 and engine is not None:
+        try:
+            prev_date_iso = pd.to_datetime(active_prices.index[-2]).strftime("%Y-%m-%d")
+            pos_prev = fetch_portfolio_positions(asof_date=prev_date_iso, engine=engine)
+        except Exception:
+            pos_prev = None
+
+    if not pos_prev:
+        pos_prev = dict(active_pos)
+    else:
+        pos_prev = {t: float(sh) for t, sh in pos_prev.items() if sh > 0 and t in active_prices.columns}
+        if not pos_prev:
+            pos_prev = dict(active_pos)
+
+    if len(active_prices) >= 2:
+        start_prices = active_prices.iloc[-2]
+        end_prices = active_prices.iloc[-1]
+        clean_pnl, pv_baseline = calculate_clean_pnl(pos_prev, start_prices, end_prices)
+
+        # Calculate value impact of new trades / position adjustments between t-1 and t
+        all_holdings_tickers = sorted(list(set(active_pos.keys()) | set(pos_prev.keys())))
+        trade_val_change = 0.0
+        trades_delta_count = 0
+        for t in all_holdings_tickers:
+            sh_curr = active_pos.get(t, 0.0)
+            sh_prev = pos_prev.get(t, 0.0)
+            delta_sh = sh_curr - sh_prev
+            if abs(delta_sh) > 1e-6:
+                px_today = float(end_prices[t]) if t in end_prices and not pd.isna(end_prices[t]) else 0.0
+                trade_val_change += delta_sh * px_today
+                trades_delta_count += 1
+
+        clean_pnl_pct = (clean_pnl / pv_baseline) * 100.0 if pv_baseline > 0 else 0.0
+        trade_val_pct = (trade_val_change / pv_baseline) * 100.0 if pv_baseline > 0 else 0.0
+    else:
+        clean_pnl = 0.0
+        clean_pnl_pct = 0.0
+        pv_baseline = curr_stocks_val
+        trade_val_change = 0.0
+        trade_val_pct = 0.0
+        trades_delta_count = 0
+
+    # -------------------------------------------------------------------------
+    # Empirical CDF (eCDF) Evaluation for Both Historical Simulation Models
+    # (Evaluates Clean P&L against scenario distributions on identical baseline portfolio)
+    # -------------------------------------------------------------------------
+    ecdf_hist_res = None
+    ecdf_vol_res = None
+
+    if len(active_prices) >= 20 and pv_baseline > 0 and pos_prev:
+        try:
+            prices_up_to_prev = active_prices.iloc[:-1]
+            lookback_obs = min(260, len(prices_up_to_prev) - 1)
+            prev_asof_str = str(prices_up_to_prev.index[-1])[:10]
+
+            if lookback_obs >= 10:
+                # 1. Historical Simulation (Unscaled)
+                m_hist = HistoricalVaR(confidence_level=0.95, horizon_days=1, lookback_days=lookback_obs)
+                pnl_mat_hist, _, _ = m_hist.generate_scenario_pnl_matrix(
+                    positions=pos_prev,
+                    prices_gbp=prices_up_to_prev,
+                    asof_date=prev_asof_str
+                )
+                ppls_hist = pnl_mat_hist.sum(axis=1).values
+                ecdf_hist_res = empiricalCDF(
+                    simulated_ppls=ppls_hist,
+                    actual_pnl=clean_pnl,
+                    portfolio_value=pv_baseline,
+                    return_details=True
+                )
+
+                # 2. Volatility-Scaled Historical Simulation (EWMA lambda=0.94)
+                m_vol = VolatilityScaledVaR(
+                    volatility_estimator=EWMAVolatility(decay_factor=0.94),
+                    confidence_level=0.95,
+                    horizon_days=1,
+                    lookback_days=lookback_obs
+                )
+                pnl_mat_vol, _, _ = m_vol.generate_scenario_pnl_matrix(
+                    positions=pos_prev,
+                    prices_gbp=prices_up_to_prev,
+                    asof_date=prev_asof_str
+                )
+                ppls_vol = pnl_mat_vol.sum(axis=1).values
+                ecdf_vol_res = empiricalCDF(
+                    simulated_ppls=ppls_vol,
+                    actual_pnl=clean_pnl,
+                    portfolio_value=pv_baseline,
+                    return_details=True
+                )
+        except Exception:
+            pass
+
+    # Row 1: Valuation KPIs & Day-over-Day P&L Decomposition (5 Columns)
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5 = st.columns(5)
 
     with col_kpi1:
         delta_str = f"{diff_stocks_val:+,.2f} ({diff_stocks_pct:+.2f}%)" if prev_stocks_val is not None else None
         st.metric(
             label=f"Current Value ({curr_date_str})",
             value=f"£{curr_stocks_val:,.2f}",
-            delta=delta_str
+            delta=delta_str,
+            help="Total market value of held stock positions as of the reporting date."
         )
 
     with col_kpi2:
         st.metric(
             label=f"Previous Value ({prev_date_str})",
-            value=f"£{prev_stocks_val:,.2f}" if prev_stocks_val is not None else "N/A"
+            value=f"£{prev_stocks_val:,.2f}" if prev_stocks_val is not None else "N/A",
+            help="Total market value of stock holdings on the preceding available trading date."
         )
 
     with col_kpi3:
         diff_sign = "+" if diff_stocks_val > 0 else ("-" if diff_stocks_val < 0 else "")
         st.metric(
-            label="Day-over-Day Change",
+            label="Day-over-Day Total PV Change",
             value=f"{diff_sign}£{abs(diff_stocks_val):,.2f}" if prev_stocks_val is not None else "£0.00",
-            delta=f"{diff_stocks_pct:+.2f}%" if prev_stocks_val is not None else None
+            delta=f"{diff_stocks_pct:+.2f}% Total PV" if prev_stocks_val is not None else None,
+            help="Net day-over-day change in portfolio valuation (combines pure market price moves and new trades)."
         )
 
     with col_kpi4:
+        clean_sign = "+" if clean_pnl > 0 else ("-" if clean_pnl < 0 else "")
         st.metric(
-            label="Active Positions",
-            value=f"{len(active_pos)} assets"
+            label="Market P&L (Clean / Hypo)",
+            value=f"{clean_sign}£{abs(clean_pnl):,.2f}",
+            delta=f"{clean_pnl_pct:+.2f}% (0 Position Impact)",
+            help="Hypothetical / Clean P&L: Pure price movement impact on baseline holdings (held frozen with ZERO position impact)."
+        )
+
+    with col_kpi5:
+        trade_sign = "+" if trade_val_change > 0 else ("-" if trade_val_change < 0 else "")
+        trades_label = f"{trades_delta_count} position changes" if trades_delta_count > 0 else "No new trades"
+        st.metric(
+            label="New Trades Value Impact",
+            value=f"{trade_sign}£{abs(trade_val_change):,.2f}",
+            delta=trades_label,
+            delta_color="normal" if trade_val_change >= 0 else "inverse",
+            help="Portfolio value change originating strictly from new share purchases or sales executed on this day."
+        )
+
+    # Row 2: Risk Backtesting & Empirical CDF (eCDF) for Both Historical Simulation Models
+    st.markdown("##### 🛡️ Risk Model Backtesting: Empirical CDF (eCDF)")
+    st.caption(
+        f"Evaluates the realized Clean P&L (£{clean_pnl:,.2f}, zero position impact) "
+        f"against 1-day simulated scenario P&L distributions for the identical portfolio baseline (£{pv_baseline:,.2f}). "
+        f"An eCDF value ≤ 5.0% represents a 95% VaR tail exception."
+    )
+
+    col_e1, col_e2, col_e3 = st.columns([1.5, 1.5, 1.0])
+
+    with col_e1:
+        if ecdf_hist_res is not None:
+            ecdf_pct_str = f"{ecdf_hist_res.percentile:.1f}%"
+            status_text = "⚠️ 95% VaR Breach" if ecdf_hist_res.is_var_95_breach else "🟢 Normal Range"
+            delta_val = f"{status_text} | 95% VaR: £{ecdf_hist_res.var_95_gbp:,.2f}"
+            st.metric(
+                label="Historical Simulation eCDF (Unscaled)",
+                value=f"{ecdf_pct_str} (eCDF: {ecdf_hist_res.cdf_value:.4f})",
+                delta=delta_val,
+                delta_color="inverse" if ecdf_hist_res.is_var_95_breach else "normal",
+                help=f"Empirical probability P(PPL <= Clean P&L) across {ecdf_hist_res.simulated_count} historical scenarios. Mean: £{ecdf_hist_res.pnl_mean:,.2f}."
+            )
+        else:
+            st.metric(
+                label="Historical Simulation eCDF (Unscaled)",
+                value="N/A",
+                delta="Insufficient history (<20d)"
+            )
+
+    with col_e2:
+        if ecdf_vol_res is not None:
+            ecdf_vol_pct_str = f"{ecdf_vol_res.percentile:.1f}%"
+            vol_status_text = "⚠️ 95% VaR Breach" if ecdf_vol_res.is_var_95_breach else "🟢 Normal Range"
+            vol_delta_val = f"{vol_status_text} | 95% VaR: £{ecdf_vol_res.var_95_gbp:,.2f}"
+            st.metric(
+                label="Vol-Scaled Simulation eCDF (EWMA λ=0.94)",
+                value=f"{ecdf_vol_pct_str} (eCDF: {ecdf_vol_res.cdf_value:.4f})",
+                delta=vol_delta_val,
+                delta_color="inverse" if ecdf_vol_res.is_var_95_breach else "normal",
+                help=f"Empirical probability P(PPL <= Clean P&L) across {ecdf_vol_res.simulated_count} volatility-scaled scenarios. Mean: £{ecdf_vol_res.pnl_mean:,.2f}."
+            )
+        else:
+            st.metric(
+                label="Vol-Scaled Simulation eCDF (EWMA λ=0.94)",
+                value="N/A",
+                delta="Insufficient history (<20d)"
+            )
+
+    with col_e3:
+        st.metric(
+            label="Baseline Risk Portfolio (PV)",
+            value=f"£{pv_baseline:,.2f}",
+            delta=f"{len(pos_prev)} assets at {prev_date_str}",
+            help="Identical baseline portfolio snapshot held at t-1 used for both simulated PPLs and Clean P&L."
+        )
+
+    with st.expander("ℹ️ How Portfolio Value Decomposition & Empirical CDF (eCDF) Work", expanded=False):
+        st.markdown(
+            r"""
+            - **Total PV Change:** $\Delta \text{PV} = \text{PV}_t - \text{PV}_{t-1} = \text{Market P\&L (Clean)} + \text{New Trades Impact}$.
+            - **Market P&L (Clean / Hypothetical P&L):** Isolates the pure market price impact on baseline holdings locked at $t-1$ (zero position impact / no intraday trades).
+            - **New Trades Value Impact:** Monetary value change originating strictly from new share acquisitions or sales executed on this day.
+            - **Historical Simulation eCDF:** $\hat{F}_N(\text{Clean P\&L}) = \frac{1}{N} \sum_{s=1}^N \mathbf{1}_{\{\text{PPL}_s \le \text{Clean P\&L}\}}$. Represents the exact empirical percentile of the clean market move relative to 260 days of historical portfolio returns.
+            - **Volatility-Scaled Simulation eCDF:** Standardizes historical returns by EWMA volatility to adapt to current volatility conditions before evaluating the empirical CDF.
+            """
         )
 
     st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
+
 
     # -------------------------------------------------------------------------
     # 2. Top 10 Movers in Absolute Terms

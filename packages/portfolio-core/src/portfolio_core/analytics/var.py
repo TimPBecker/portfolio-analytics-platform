@@ -1324,3 +1324,459 @@ def compute_shapley_risk_contributions(
 
     df = pd.DataFrame(records).sort_values("HIST_SHAPLEY_VAR_GBP", ascending=True).reset_index(drop=True)
     return df
+
+
+# =====================================================================
+# 5. Empirical CDF, Hypothetical/Clean P&L & Backtesting Diagnostics
+# =====================================================================
+
+@dataclass
+class EmpiricalCDFResult:
+    """
+    Structured outcome of Empirical Cumulative Distribution Function (eCDF) evaluation.
+
+    Attributes:
+    -----------
+    cdf_value : float
+        Empirical CDF probability value in [0.0, 1.0].
+    actual_pnl : float
+        The realized / hypothetical clean P&L evaluated (£).
+    simulated_count : int
+        Total number of valid simulated scenario PPL observations.
+    count_satisfying : int
+        Number of simulated scenarios satisfying the inequality (e.g. PPL <= actual_pnl).
+    percentile : float
+        Empirical percentile equivalent (cdf_value * 100.0).
+    portfolio_value : Optional[float]
+        Baseline portfolio value (PV) at start of horizon (t-1).
+    actual_return_pct : Optional[float]
+        Actual clean P&L expressed as a percentage of baseline PV.
+    pnl_mean : float
+        Mean of simulated scenario PPL distribution (£).
+    pnl_std : float
+        Standard deviation of simulated scenario PPL distribution (£).
+    pnl_min : float
+        Minimum scenario P&L in the simulated sample (£).
+    pnl_max : float
+        Maximum scenario P&L in the simulated sample (£).
+    var_95_gbp : float
+        5th percentile (95% Value-at-Risk) of simulated PPLs (£).
+    var_99_gbp : float
+        1st percentile (99% Value-at-Risk) of simulated PPLs (£).
+    is_var_95_breach : bool
+        True if actual clean P&L was worse (strictly lower) than 95% VaR.
+    is_var_99_breach : bool
+        True if actual clean P&L was worse (strictly lower) than 99% VaR.
+    method : str
+        The inequality evaluation method used (e.g., 'less_equal').
+    """
+    cdf_value: float
+    actual_pnl: float
+    simulated_count: int
+    count_satisfying: int
+    percentile: float
+    portfolio_value: Optional[float] = None
+    actual_return_pct: Optional[float] = None
+    pnl_mean: Optional[float] = None
+    pnl_std: Optional[float] = None
+    pnl_min: Optional[float] = None
+    pnl_max: Optional[float] = None
+    var_95_gbp: Optional[float] = None
+    var_99_gbp: Optional[float] = None
+    is_var_95_breach: Optional[bool] = None
+    is_var_99_breach: Optional[bool] = None
+    method: str = "less_equal"
+
+    def __float__(self) -> float:
+        return float(self.cdf_value)
+
+    def to_dict(self) -> dict:
+        return {
+            "CDF Value (Probability)": round(self.cdf_value, 6),
+            "Percentile": f"{self.percentile:.2f}%",
+            "Actual Clean P&L (£)": f"£{self.actual_pnl:,.2f}",
+            "Portfolio Value (£)": f"£{self.portfolio_value:,.2f}" if self.portfolio_value is not None else "N/A",
+            "Actual Return (%)": f"{self.actual_return_pct:+.2f}%" if self.actual_return_pct is not None else "N/A",
+            "Simulated Observations": self.simulated_count,
+            "Scenarios <= Actual P&L": self.count_satisfying,
+            "Distribution Mean (£)": f"£{self.pnl_mean:,.2f}" if self.pnl_mean is not None else "N/A",
+            "Distribution Std (£)": f"£{self.pnl_std:,.2f}" if self.pnl_std is not None else "N/A",
+            "95% VaR Threshold (£)": f"£{self.var_95_gbp:,.2f}" if self.var_95_gbp is not None else "N/A",
+            "99% VaR Threshold (£)": f"£{self.var_99_gbp:,.2f}" if self.var_99_gbp is not None else "N/A",
+            "95% VaR Breach": "YES" if self.is_var_95_breach else "NO",
+            "99% VaR Breach": "YES" if self.is_var_99_breach else "NO",
+            "Method": self.method,
+        }
+
+    def summary_markdown(self) -> str:
+        data = self.to_dict()
+        df = pd.DataFrame(list(data.items()), columns=["Metric", "Value"])
+        return df.to_markdown(index=False)
+
+    def __repr__(self) -> str:
+        pv_str = f" PV=£{self.portfolio_value:,.2f}" if self.portfolio_value is not None else ""
+        return (
+            f"<EmpiricalCDFResult cdf={self.cdf_value:.4f} ({self.percentile:.2f}%) "
+            f"actual_pnl=£{self.actual_pnl:,.2f}{pv_str} n_sim={self.simulated_count}>"
+        )
+
+
+def calculate_clean_pnl(
+    positions: Dict[str, float],
+    start_prices: Union[pd.Series, Dict[str, float]],
+    end_prices: Union[pd.Series, Dict[str, float]],
+) -> Tuple[float, float]:
+    """
+    Computes Hypothetical / Clean P&L (with ZERO position impact) and Portfolio Value (PV).
+
+    In regulatory risk standards (Basel III, FRTB - BCBS 457) and quantitative risk modeling,
+    VaR backtesting and empirical distribution validation require comparing model-simulated
+    PPLs against Hypothetical P&L (Clean P&L).
+
+    Hypothetical P&L locks the portfolio composition at the start of the horizon (t-1),
+    evaluating price changes across the holding period while strictly excluding any intraday
+    trades, new position entries, rebalancing, or execution costs ("no position impact").
+
+    Parameters:
+    -----------
+    positions : Dict[str, float]
+        Dictionary of {ticker: shares} locked at t-1 (baseline portfolio).
+    start_prices : Union[pd.Series, Dict[str, float]]
+        Closing market prices at start of horizon (t-1).
+    end_prices : Union[pd.Series, Dict[str, float]]
+        Closing market prices at end of horizon (t).
+
+    Returns:
+    --------
+    Tuple[float, float]:
+        (clean_pnl, portfolio_value)
+        - clean_pnl: Clean / Hypothetical P&L = sum(shares_i * (price_{i, t} - price_{i, t-1})).
+        - portfolio_value: Baseline portfolio market value (PV) = sum(shares_i * price_{i, t-1}).
+    """
+    if not positions:
+        return 0.0, 0.0
+
+    p_start = pd.Series(start_prices)
+    p_end = pd.Series(end_prices)
+
+    clean_pnl = 0.0
+    portfolio_value = 0.0
+
+    for ticker, shares in positions.items():
+        if shares <= 0:
+            continue
+        if ticker in p_start and ticker in p_end:
+            p0 = float(p_start[ticker])
+            p1 = float(p_end[ticker])
+            if not np.isnan(p0) and not np.isnan(p1):
+                pos_val = float(shares) * p0
+                portfolio_value += pos_val
+                clean_pnl += float(shares) * (p1 - p0)
+
+    return float(clean_pnl), float(portfolio_value)
+
+
+# Alias for calculate_clean_pnl
+calculate_hypothetical_pnl = calculate_clean_pnl
+
+
+def empirical_cdf(
+    simulated_ppls: Union[np.ndarray, pd.Series, List[float]],
+    actual_pnl: Union[float, int, np.ndarray, pd.Series, List[float]],
+    portfolio_value: Optional[float] = None,
+    pv: Optional[float] = None,
+    side: str = "less_equal",
+    return_details: bool = False
+) -> Union[float, np.ndarray, pd.Series, EmpiricalCDFResult]:
+    """
+    Computes the Empirical Cumulative Distribution Function (eCDF) value:
+        F_n(x) = P(PPL <= actual_pnl)
+    
+    Feeds simulated Predicted Profit & Losses (PPLs) and an actual P&L value (Clean/Hypothetical
+    P&L with no position impact) to determine where actual performance falls within the
+    simulated risk distribution.
+
+    Both the simulated PPLs and the Portfolio Value (PV) must be based on the same baseline
+    portfolio snapshot at the start of the horizon (t-1).
+
+    Parameters:
+    -----------
+    simulated_ppls : Union[np.ndarray, pd.Series, List[float]]
+        1D array-like of simulated portfolio P&L values (e.g. from Historical Simulation
+        or Volatility-Scaled VaR scenarios). Signed: negative indicates loss, positive gain.
+    actual_pnl : Union[float, int, np.ndarray, pd.Series, List[float]]
+        The actual realized P&L value (typically Clean / Hypothetical P&L without position impact)
+        to evaluate. Can be a scalar or an array/Series of historical P&L values.
+    portfolio_value : Optional[float]
+        Baseline portfolio value (PV) at start of horizon (t-1). If provided, enables
+        percentage return diagnostics and consistency verification.
+    pv : Optional[float]
+        Alias for `portfolio_value`.
+    side : str
+        Evaluation rule for the empirical CDF:
+        - 'less_equal' / 'le' / 'right' (default): P(PPL <= actual_pnl) [standard CDF]
+        - 'less' / 'lt' / 'left': P(PPL < actual_pnl) [strict inequality]
+        - 'midpoint' / 'mid': (P(PPL < actual_pnl) + 0.5 * P(PPL == actual_pnl))
+        - 'greater_equal' / 'ge' / 'survival': P(PPL >= actual_pnl) [survival function]
+        - 'greater' / 'gt': P(PPL > actual_pnl)
+    return_details : bool
+        If True and actual_pnl is scalar, returns an `EmpiricalCDFResult` dataclass
+        with comprehensive distribution moments, VaR thresholds, and breach flags.
+        If False (default), returns the empirical CDF probability as a float.
+
+    Returns:
+    --------
+    Union[float, np.ndarray, pd.Series, EmpiricalCDFResult]:
+        - float: Empirical CDF value in [0.0, 1.0] when actual_pnl is a scalar.
+        - np.ndarray / pd.Series: Array/Series of eCDF values when actual_pnl is array-like.
+        - EmpiricalCDFResult: Detailed result object if return_details=True.
+    """
+    ppl_raw = np.asarray(simulated_ppls, dtype=float)
+    valid_ppls = ppl_raw[~np.isnan(ppl_raw)]
+    n_sim = len(valid_ppls)
+
+    if n_sim == 0:
+        raise ValueError("simulated_ppls must contain at least one valid non-NaN observation.")
+
+    # Resolve portfolio_value / pv alias
+    resolved_pv = portfolio_value if portfolio_value is not None else pv
+    if resolved_pv is not None and resolved_pv <= 0:
+        raise ValueError(f"portfolio_value must be positive, got {resolved_pv}")
+
+    # Standardize side method
+    side_norm = str(side).lower().strip()
+    valid_sides = {
+        "less_equal": "less_equal", "le": "less_equal", "right": "less_equal", "weak": "less_equal", "default": "less_equal",
+        "less": "less", "lt": "less", "left": "less", "strict": "less",
+        "midpoint": "midpoint", "mid": "midpoint", "continuous": "midpoint",
+        "greater_equal": "greater_equal", "ge": "greater_equal", "survival": "greater_equal",
+        "greater": "greater", "gt": "greater"
+    }
+    if side_norm not in valid_sides:
+        raise ValueError(
+            f"Invalid side '{side}'. Supported options: 'less_equal' (default), 'less', 'midpoint', 'greater_equal', 'greater'."
+        )
+    method_canonical = valid_sides[side_norm]
+
+    # Check if actual_pnl is scalar or array-like
+    is_scalar = isinstance(actual_pnl, (int, float, np.number)) and not isinstance(actual_pnl, (np.ndarray, pd.Series, list, tuple))
+
+    sorted_ppls = np.sort(valid_ppls)
+
+    if is_scalar:
+        target_val = float(actual_pnl)
+
+        if method_canonical == "less_equal":
+            count = int(np.searchsorted(sorted_ppls, target_val, side="right"))
+            cdf_val = count / n_sim
+        elif method_canonical == "less":
+            count = int(np.searchsorted(sorted_ppls, target_val, side="left"))
+            cdf_val = count / n_sim
+        elif method_canonical == "midpoint":
+            cnt_left = int(np.searchsorted(sorted_ppls, target_val, side="left"))
+            cnt_right = int(np.searchsorted(sorted_ppls, target_val, side="right"))
+            count = (cnt_left + cnt_right) / 2.0
+            cdf_val = count / n_sim
+        elif method_canonical == "greater_equal":
+            cnt_left = int(np.searchsorted(sorted_ppls, target_val, side="left"))
+            count = n_sim - cnt_left
+            cdf_val = count / n_sim
+        elif method_canonical == "greater":
+            cnt_right = int(np.searchsorted(sorted_ppls, target_val, side="right"))
+            count = n_sim - cnt_right
+            cdf_val = count / n_sim
+
+        # Clamp within [0.0, 1.0]
+        cdf_val = max(0.0, min(1.0, float(cdf_val)))
+
+        if not return_details:
+            return cdf_val
+
+        # Calculate rich distributional metadata for EmpiricalCDFResult
+        pnl_mean = float(np.mean(valid_ppls))
+        pnl_std = float(np.std(valid_ppls, ddof=1)) if n_sim > 1 else 0.0
+        pnl_min = float(np.min(valid_ppls))
+        pnl_max = float(np.max(valid_ppls))
+
+        # VaR 95% (5th percentile) and 99% (1st percentile)
+        k_95 = max(0, min(int(0.05 * n_sim), n_sim - 1))
+        k_99 = max(0, min(int(0.01 * n_sim), n_sim - 1))
+        var_95_gbp = float(sorted_ppls[k_95])
+        var_99_gbp = float(sorted_ppls[k_99])
+
+        # A VaR breach occurs when actual P&L is worse than (strictly less than) VaR
+        is_breach_95 = bool(target_val < var_95_gbp)
+        is_breach_99 = bool(target_val < var_99_gbp)
+
+        actual_ret = (target_val / resolved_pv) * 100.0 if resolved_pv is not None and resolved_pv > 0 else None
+
+        return EmpiricalCDFResult(
+            cdf_value=cdf_val,
+            actual_pnl=target_val,
+            simulated_count=n_sim,
+            count_satisfying=int(round(count)) if isinstance(count, (int, float)) else int(count),
+            percentile=cdf_val * 100.0,
+            portfolio_value=resolved_pv,
+            actual_return_pct=actual_ret,
+            pnl_mean=pnl_mean,
+            pnl_std=pnl_std,
+            pnl_min=pnl_min,
+            pnl_max=pnl_max,
+            var_95_gbp=var_95_gbp,
+            var_99_gbp=var_99_gbp,
+            is_var_95_breach=is_breach_95,
+            is_var_99_breach=is_breach_99,
+            method=method_canonical,
+        )
+
+    # Array-like actual_pnl vectorized evaluation
+    if isinstance(actual_pnl, pd.Series):
+        vals = actual_pnl.values.astype(float)
+        is_series = True
+    else:
+        vals = np.asarray(actual_pnl, dtype=float)
+        is_series = False
+
+    if method_canonical == "less_equal":
+        counts = np.searchsorted(sorted_ppls, vals, side="right")
+        res_arr = counts / n_sim
+    elif method_canonical == "less":
+        counts = np.searchsorted(sorted_ppls, vals, side="left")
+        res_arr = counts / n_sim
+    elif method_canonical == "midpoint":
+        c_l = np.searchsorted(sorted_ppls, vals, side="left")
+        c_r = np.searchsorted(sorted_ppls, vals, side="right")
+        res_arr = (c_l + c_r) / (2.0 * n_sim)
+    elif method_canonical == "greater_equal":
+        c_l = np.searchsorted(sorted_ppls, vals, side="left")
+        res_arr = (n_sim - c_l) / n_sim
+    elif method_canonical == "greater":
+        c_r = np.searchsorted(sorted_ppls, vals, side="right")
+        res_arr = (n_sim - c_r) / n_sim
+
+    res_arr = np.clip(res_arr, 0.0, 1.0)
+    if is_series:
+        return pd.Series(res_arr, index=actual_pnl.index)
+    return res_arr
+
+
+# Exact user-requested name alias
+empiricalCDF = empirical_cdf
+
+
+def compute_portfolio_empirical_cdf(
+    positions: Dict[str, float],
+    prices_gbp: pd.DataFrame,
+    asof_date: Optional[str] = None,
+    evaluation_date: Optional[str] = None,
+    model: Optional[ValueAtRiskModel] = None,
+    lookback_days: int = 260,
+    side: str = "less_equal",
+    return_details: bool = False
+) -> Union[float, EmpiricalCDFResult]:
+    """
+    End-to-end institutional workflow:
+    1. Locks the baseline portfolio at asof_date (t-1) and calculates Portfolio Value (PV).
+    2. Generates simulated scenario PPLs based on the exact same portfolio snapshot.
+    3. Calculates the realized Clean / Hypothetical P&L between t-1 and evaluation_date (t),
+       strictly excluding intraday trades, orders, or rebalancing ("no position impact").
+    4. Evaluates and returns the empirical CDF value F_n(Clean P&L) against the simulated PPLs.
+
+    Parameters:
+    -----------
+    positions : Dict[str, float]
+        Dictionary of {ticker: shares} locked at asof_date (t-1).
+    prices_gbp : pd.DataFrame
+        Historical price matrix (Date index x Ticker columns) in GBP.
+    asof_date : Optional[str]
+        Start of horizon valuation date (t-1). Defaults to the penultimate date in prices_gbp.
+    evaluation_date : Optional[str]
+        End of horizon evaluation date (t). Defaults to the final date in prices_gbp.
+    model : Optional[ValueAtRiskModel]
+        Value-at-Risk simulation model (defaults to HistoricalVaR with horizon=1).
+    lookback_days : int
+        Lookback window for historical return scenarios (default: 260).
+    side : str
+        Empirical CDF inequality convention ('less_equal', 'less', 'midpoint').
+    return_details : bool
+        Whether to return an `EmpiricalCDFResult` object with complete backtesting diagnostics.
+
+    Returns:
+    --------
+    Union[float, EmpiricalCDFResult]:
+        Empirical CDF probability value (or detailed EmpiricalCDFResult if requested).
+    """
+    if prices_gbp is None or prices_gbp.empty:
+        raise ValueError("Price matrix prices_gbp cannot be empty.")
+    if not positions:
+        raise ValueError("Positions dictionary cannot be empty.")
+
+    sorted_prices = prices_gbp.sort_index()
+    all_dates = list(sorted_prices.index)
+    date_strs = [str(d)[:10] for d in all_dates]
+
+    # Resolve asof_date (t-1) and evaluation_date (t)
+    if asof_date is None and evaluation_date is None:
+        if len(all_dates) < 2:
+            raise ValueError("prices_gbp must contain at least 2 dates to compute clean P&L.")
+        idx_asof = len(all_dates) - 2
+        idx_eval = len(all_dates) - 1
+    elif asof_date is not None and evaluation_date is None:
+        target_asof_str = str(asof_date)[:10]
+        if target_asof_str not in date_strs:
+            raise ValueError(f"asof_date {asof_date} not found in price history index.")
+        idx_asof = date_strs.index(target_asof_str)
+        if idx_asof >= len(all_dates) - 1:
+            raise ValueError(f"asof_date {asof_date} is the last date in prices_gbp; subsequent evaluation_date required.")
+        idx_eval = idx_asof + 1
+    elif asof_date is None and evaluation_date is not None:
+        target_eval_str = str(evaluation_date)[:10]
+        if target_eval_str not in date_strs:
+            raise ValueError(f"evaluation_date {evaluation_date} not found in price history index.")
+        idx_eval = date_strs.index(target_eval_str)
+        if idx_eval <= 0:
+            raise ValueError(f"evaluation_date {evaluation_date} is the first date in prices_gbp; prior asof_date required.")
+        idx_asof = idx_eval - 1
+    else:
+        target_asof_str = str(asof_date)[:10]
+        target_eval_str = str(evaluation_date)[:10]
+        if target_asof_str not in date_strs:
+            raise ValueError(f"asof_date {asof_date} not found in price history index.")
+        if target_eval_str not in date_strs:
+            raise ValueError(f"evaluation_date {evaluation_date} not found in price history index.")
+        idx_asof = date_strs.index(target_asof_str)
+        idx_eval = date_strs.index(target_eval_str)
+        if idx_asof >= idx_eval:
+            raise ValueError(f"asof_date ({asof_date}) must strictly precede evaluation_date ({evaluation_date}).")
+
+    actual_asof_date = all_dates[idx_asof]
+    actual_eval_date = all_dates[idx_eval]
+
+    # Calculate Clean / Hypothetical P&L (zero position impact) and Portfolio Value (PV)
+    p_start = sorted_prices.loc[actual_asof_date]
+    p_end = sorted_prices.loc[actual_eval_date]
+    clean_pnl, pv = calculate_clean_pnl(positions, p_start, p_end)
+
+    if pv <= 0:
+        raise ValueError(f"Calculated Portfolio Value (PV) is non-positive (£{pv:,.2f}). Check active positions and prices.")
+
+    # Generate simulated PPLs using the exact same portfolio snapshot
+    sim_model = model or HistoricalVaR(confidence_level=0.95, horizon_days=1, lookback_days=lookback_days)
+    prices_up_to_asof = sorted_prices.iloc[:idx_asof + 1]
+
+    pnl_matrix, pos_series, _ = sim_model.generate_scenario_pnl_matrix(
+        positions=positions,
+        prices_gbp=prices_up_to_asof,
+        asof_date=str(actual_asof_date)[:10]
+    )
+
+    simulated_ppls = pnl_matrix.sum(axis=1).values
+
+    return empirical_cdf(
+        simulated_ppls=simulated_ppls,
+        actual_pnl=clean_pnl,
+        portfolio_value=pv,
+        side=side,
+        return_details=return_details
+    )
+
