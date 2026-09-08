@@ -287,4 +287,58 @@ def test_get_engine_with_database_param():
     assert conn_str_prod.endswith("/stocks")
 
 
+def test_delete_data_after_date(sqlite_test_engine):
+    """Verify delete_data_after_date prunes tables correctly, respects dry_run and include_transactions."""
+    from portfolio_core.db import delete_data_after_date, create_all_tables
+    import pytest
 
+    sqlite_engine = sqlite_test_engine
+
+    create_all_tables(sqlite_engine)
+
+    with sqlite_engine.begin() as conn:
+        # Insert sample rows on 2026-09-05, 2026-09-07, and 2026-09-08
+        conn.execute(text("INSERT INTO PORTFOLIO_VALUES (DATE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-05', 100, 90, 10, 'GBP')"))
+        conn.execute(text("INSERT INTO PORTFOLIO_VALUES (DATE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-07', 105, 95, 10, 'GBP')"))
+        conn.execute(text("INSERT INTO PORTFOLIO_VALUES (DATE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-08', 110, 100, 10, 'GBP')"))
+
+        conn.execute(text("INSERT INTO BENCHMARK_VALUES (DATE, BENCHMARK_CODE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-07', 'BM1', 100, 100, 0, 'GBP')"))
+        conn.execute(text("INSERT INTO BENCHMARK_VALUES (DATE, BENCHMARK_CODE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-08', 'BM1', 102, 102, 0, 'GBP')"))
+
+        conn.execute(text("INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY) VALUES (1, 'AAPL', '2026-09-07', 10)"))
+        conn.execute(text("INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY) VALUES (2, 'AAPL', '2026-09-08', 20)"))
+
+    # 1. Test Dry Run
+    preview = delete_data_after_date("2026-09-07", engine=sqlite_engine, dry_run=True)
+    assert preview["PORTFOLIO_VALUES"] == 1
+    assert preview["BENCHMARK_VALUES"] == 1
+    assert "TRANSACTIONS" not in preview  # excluded by default
+
+    # Verify no rows deleted yet
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM PORTFOLIO_VALUES")).scalar() == 3
+
+    # 2. Test Deletion preserving transactions
+    res = delete_data_after_date("2026-09-07", engine=sqlite_engine, include_transactions=False)
+    assert res["PORTFOLIO_VALUES"] == 1
+    assert res["BENCHMARK_VALUES"] == 1
+    assert "TRANSACTIONS" not in res
+
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM PORTFOLIO_VALUES")).scalar() == 2
+        assert conn.execute(text("SELECT MAX(DATE) FROM PORTFOLIO_VALUES")).scalar() == "2026-09-07"
+        assert conn.execute(text("SELECT COUNT(*) FROM BENCHMARK_VALUES")).scalar() == 1
+        # Transactions preserved
+        assert conn.execute(text("SELECT COUNT(*) FROM TRANSACTIONS")).scalar() == 2
+
+    # 3. Test Deletion including transactions
+    res_tx = delete_data_after_date("2026-09-07", engine=sqlite_engine, include_transactions=True)
+    assert res_tx["TRANSACTIONS"] == 1
+
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM TRANSACTIONS")).scalar() == 1
+        assert conn.execute(text("SELECT MAX(TRANSACTION_DATE) FROM TRANSACTIONS")).scalar() == "2026-09-07"
+
+    # 4. Test invalid date format raises ValueError
+    with pytest.raises(ValueError):
+        delete_data_after_date("invalid-date", engine=sqlite_engine)

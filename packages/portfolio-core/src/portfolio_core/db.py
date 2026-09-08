@@ -2118,6 +2118,8 @@ PIPELINE_TABLES_TO_CLEAR = [
     "PORTFOLIO_RISK_CONTRIBUTIONS",
     "PORTFOLIO_VAR",
     "PORTFOLIO_VALUES",
+    "BENCHMARK_VALUES",
+    "BENCHMARK_TRANSACTIONS",
     "CASHACCOUNT",
     "CASHFLOWS",
     "FX_RATES",
@@ -2134,6 +2136,8 @@ def clear_all_tables_except_transactions(engine=None) -> Dict[str, int]:
       - PORTFOLIO_RISK_CONTRIBUTIONS
       - PORTFOLIO_VAR
       - PORTFOLIO_VALUES
+      - BENCHMARK_VALUES
+      - BENCHMARK_TRANSACTIONS
       - CASHACCOUNT
       - CASHFLOWS
       - FX_RATES
@@ -2175,6 +2179,114 @@ def clear_all_tables_except_transactions(engine=None) -> Dict[str, int]:
 clear_all_pipeline_tables = clear_all_tables_except_transactions
 
 
+TABLES_WITH_DATE_COLUMNS: Dict[str, str] = {
+    "PORTFOLIO_SCENARIO_PNL": "ASOF_DATE",
+    "PORTFOLIO_RISK_CONTRIBUTIONS": "DATE",
+    "PORTFOLIO_VAR": "DATE",
+    "PORTFOLIO_VALUES": "DATE",
+    "BENCHMARK_VALUES": "DATE",
+    "BENCHMARK_TRANSACTIONS": "TRANSACTION_DATE",
+    "CASHACCOUNT": "DATE",
+    "CASHFLOWS": "DATE",
+    "ASSET_PRICES": "DATE",
+    "FX_RATES": "DATE",
+    "TRANSACTIONS": "TRANSACTION_DATE",
+}
+
+
+def delete_data_after_date(
+    cutoff_date: Union[str, date, Any],
+    engine: Optional[Engine] = None,
+    include_transactions: bool = False,
+    tables: Optional[List[str]] = None,
+    dry_run: bool = False,
+) -> Dict[str, int]:
+    """
+    Deletes (or previews) records with date strictly greater than cutoff_date across database tables.
+
+    Parameters:
+        cutoff_date: Cutoff date as 'YYYY-MM-DD' string, datetime.date, or datetime.datetime.
+                     Records with date > cutoff_date will be deleted.
+        engine: Optional SQLAlchemy engine. Defaults to get_engine().
+        include_transactions: If False (default), the manual TRANSACTIONS table is preserved.
+                              If True, TRANSACTIONS with TRANSACTION_DATE > cutoff_date are also deleted.
+        tables: Optional list of table names to target. If None, targets all relevant tables.
+        dry_run: If True, only counts matching rows without executing any DELETE.
+
+    Returns:
+        Dict mapping table names to the number of rows deleted (or matching, if dry_run=True).
+    """
+    if hasattr(cutoff_date, "strftime"):
+        date_str = cutoff_date.strftime("%Y-%m-%d")
+    elif isinstance(cutoff_date, str):
+        clean = cutoff_date.strip()[:10]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", clean):
+            raise ValueError(f"Invalid cutoff_date '{cutoff_date}'. Expected 'YYYY-MM-DD'.")
+        date_str = clean
+    else:
+        raise ValueError(f"cutoff_date must be str or date-like object, got {type(cutoff_date)}")
+
+    eng = engine or get_engine()
+    is_sqlite = (eng.dialect.name == "sqlite")
+
+    # Determine candidate tables
+    target_tables = TABLES_WITH_DATE_COLUMNS.copy()
+    if not include_transactions and "TRANSACTIONS" in target_tables:
+        del target_tables["TRANSACTIONS"]
+
+    if tables is not None:
+        target_names = {t.strip().upper() for t in tables}
+        target_tables = {t: col for t, col in target_tables.items() if t.upper() in target_names}
+
+    results: Dict[str, int] = {}
+
+    with eng.connect() as conn:
+        if is_sqlite:
+            existing = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+        else:
+            existing = [r[0] for r in conn.execute(text("SHOW TABLES")).fetchall()]
+
+    existing_set = set(existing)
+
+    if dry_run:
+        with eng.connect() as conn:
+            for tbl, date_col in target_tables.items():
+                if tbl in existing_set:
+                    try:
+                        cnt = conn.execute(
+                            text(f"SELECT COUNT(*) FROM `{tbl}` WHERE `{date_col}` > :cutoff"),
+                            {"cutoff": date_str}
+                        ).scalar()
+                        results[tbl] = int(cnt or 0)
+                    except Exception:
+                        results[tbl] = 0
+                else:
+                    results[tbl] = 0
+        return results
+
+    with eng.begin() as conn:
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+
+        for tbl, date_col in target_tables.items():
+            if tbl in existing_set:
+                try:
+                    del_res = conn.execute(
+                        text(f"DELETE FROM `{tbl}` WHERE `{date_col}` > :cutoff"),
+                        {"cutoff": date_str}
+                    )
+                    results[tbl] = int(del_res.rowcount if del_res.rowcount is not None and del_res.rowcount >= 0 else 0)
+                except Exception:
+                    results[tbl] = 0
+            else:
+                results[tbl] = 0
+
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+
+    return results
+
+
 if __name__ == "__main__":
     import sys
     if "--clear-tables" in sys.argv:
@@ -2182,6 +2294,23 @@ if __name__ == "__main__":
         deleted = clear_all_tables_except_transactions()
         for tbl, cnt in deleted.items():
             print(f"  - {tbl}: {cnt:,} rows deleted")
+        print("Done.")
+    elif any(arg.startswith("--delete-after") for arg in sys.argv):
+        idx = next(i for i, arg in enumerate(sys.argv) if arg.startswith("--delete-after"))
+        if "=" in sys.argv[idx]:
+            dt = sys.argv[idx].split("=", 1)[1]
+        elif idx + 1 < len(sys.argv):
+            dt = sys.argv[idx + 1]
+        else:
+            print("Usage: python -m portfolio_core.db --delete-after YYYY-MM-DD [--include-transactions] [--dry-run]")
+            sys.exit(1)
+        inc_tx = "--include-transactions" in sys.argv
+        dry = "--dry-run" in sys.argv
+        mode_str = "Previewing rows to delete" if dry else "Deleting rows"
+        print(f"{mode_str} with date > {dt} (include_transactions={inc_tx})...")
+        res = delete_data_after_date(dt, include_transactions=inc_tx, dry_run=dry)
+        for tbl, cnt in res.items():
+            print(f"  - {tbl}: {cnt:,} rows {'matched' if dry else 'deleted'}")
         print("Done.")
     else:
         run_full_pipeline()
