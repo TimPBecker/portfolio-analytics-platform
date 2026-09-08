@@ -35,6 +35,9 @@ from portfolio_core.db import (
     calculate_and_store_daily_portfolio_values,
     calculate_and_store_daily_benchmark_values,
     generate_and_store_benchmark_transactions,
+    check_benchmark_transactions_coverage,
+    regenerate_risk_numbers_from_date,
+    sync_benchmark_transactions_and_risk,
     fetch_benchmarks_info,
     fetch_benchmark_values_history,
     fetch_historical_prices_gbp,
@@ -368,21 +371,52 @@ def portfolio_daily_values(config: PortfolioValuesConfig, db: DatabaseResource):
             engine=engine
         )
     
+    # -------------------------------------------------------------------------
+    # Benchmark transactions coverage check:
+    # Check if for every transaction the corresponding benchmark transactions were made
+    # -------------------------------------------------------------------------
+    logger.info("Checking if for every transaction the corresponding benchmark transactions were made...")
+    coverage = check_benchmark_transactions_coverage(engine=engine)
+
+    bm_sync_performed = False
+    earliest_missing_date = coverage.get("earliest_missing_date")
+    missing_tx_ids = coverage.get("missing_tx_ids", [])
+    risk_dates_recomputed = 0
+
+    if not coverage["is_synced"]:
+        logger.warning(
+            f"Benchmark transactions out of sync! Found {coverage['missing_count']} transaction(s) "
+            f"without corresponding benchmark transactions starting from {earliest_missing_date} (IDs: {missing_tx_ids}). "
+            "Regenerating benchmark shadow transactions, daily benchmark values, and subsequent risk numbers..."
+        )
+        sync_result = sync_benchmark_transactions_and_risk(
+            engine=engine,
+            min_lookback=260,
+            lookback_days=260,
+        )
+        bm_sync_performed = True
+        bm_stored = sync_result.get("benchmark_values_stored", 0)
+        risk_dates_recomputed = sync_result.get("risk_stats", {}).get("dates_count", 0)
+        logger.info(
+            f"Benchmark synchronization complete: {bm_stored} benchmark valuations stored, "
+            f"{risk_dates_recomputed} subsequent dates risk numbers regenerated from {earliest_missing_date}."
+        )
+    else:
+        logger.info("All transactions have corresponding benchmark transactions.")
+        try:
+            bm_res = calculate_and_store_daily_benchmark_values(engine=engine)
+            bm_stored = bm_res.get("records_stored", 0)
+            logger.info(f"Calculated and stored {bm_stored} benchmark daily valuation records across active benchmarks.")
+        except Exception as e:
+            logger.warning(f"Failed to calculate benchmark daily values: {e}")
+            bm_stored = 0
+
     res = calculate_and_store_daily_portfolio_values(
-        backfill_days=config.backfill_days,
+        backfill_days=(-1 if bm_sync_performed else config.backfill_days),
         engine=engine
     )
     records_stored = res["records_stored"]
 
-    # Calculate shadow transactions and daily benchmark valuations
-    try:
-        bm_res = calculate_and_store_daily_benchmark_values(engine=engine)
-        bm_stored = bm_res.get("records_stored", 0)
-        logger.info(f"Calculated and stored {bm_stored} benchmark daily valuation records across active benchmarks.")
-    except Exception as e:
-        logger.warning(f"Failed to calculate benchmark daily values: {e}")
-        bm_stored = 0
-    
     if records_stored == 0:
         return Output(value=0, metadata={"Status": "No records to calculate"})
         
@@ -400,20 +434,28 @@ def portfolio_daily_values(config: PortfolioValuesConfig, db: DatabaseResource):
         f"Latest ({latest_date}): TOTAL=£{latest_tot:,.2f}, STOCKS=£{latest_stk:,.2f}, CASH=£{latest_csh:,.2f}"
     )
     
+    metadata = {
+        "Status": "Daily portfolio values stored in remote MariaDB PORTFOLIO_VALUES table",
+        "Records Stored": records_stored,
+        "Benchmark Valuations Stored": bm_stored,
+        "Benchmark Transactions Synced": not bm_sync_performed,
+        "Backfill Days": config.backfill_days if not bm_sync_performed else -1,
+        "Latest Valuation Date": latest_date,
+        "Total Portfolio Value": f"£{latest_tot:,.2f} {currency}",
+        "Stock Holdings Value": f"£{latest_stk:,.2f} {currency}",
+        "Cash Balance": f"£{latest_csh:,.2f} {currency}",
+        "Currency": currency,
+        "Recent Valuations Preview": MetadataValue.md(preview)
+    }
+    if bm_sync_performed:
+        metadata["Benchmark Sync Triggered"] = "Yes - New transactions detected without benchmark transactions"
+        metadata["Earliest Missing Date"] = str(earliest_missing_date)
+        metadata["Missing Transaction IDs"] = str(missing_tx_ids)
+        metadata["Risk Numbers Regenerated (Dates Count)"] = risk_dates_recomputed
+
     return Output(
         value=records_stored,
-        metadata={
-            "Status": "Daily portfolio values stored in remote MariaDB PORTFOLIO_VALUES table",
-            "Records Stored": records_stored,
-            "Benchmark Valuations Stored": bm_stored,
-            "Backfill Days": config.backfill_days,
-            "Latest Valuation Date": latest_date,
-            "Total Portfolio Value": f"£{latest_tot:,.2f} {currency}",
-            "Stock Holdings Value": f"£{latest_stk:,.2f} {currency}",
-            "Cash Balance": f"£{latest_csh:,.2f} {currency}",
-            "Currency": currency,
-            "Recent Valuations Preview": MetadataValue.md(preview)
-        }
+        metadata=metadata
     )
 
 
@@ -463,6 +505,26 @@ def run_risk_pipeline(
     """
     engine = engine or get_engine()
     backfill_stats = None
+
+    # Check if benchmark transactions coverage is complete; if unsynced, trigger synchronization
+    coverage = check_benchmark_transactions_coverage(engine=engine)
+    if not coverage["is_synced"]:
+        sync_result = sync_benchmark_transactions_and_risk(
+            engine=engine,
+            min_lookback=min_lookback,
+            lookback_days=lookback_days,
+            num_permutations=num_permutations,
+            var_min_percentile=var_min_percentile,
+            var_max_percentile=var_max_percentile,
+            shapley_min_percentile=shapley_min_percentile,
+            shapley_max_percentile=shapley_max_percentile,
+        )
+        backfill_stats = {
+            "sync_triggered": True,
+            "missing_tx_count": coverage["missing_count"],
+            "earliest_missing_date": coverage["earliest_missing_date"],
+            "risk_stats": sync_result.get("risk_stats", {}),
+        }
     if backfill_days != 0:
         limit = None if backfill_days < 0 else backfill_days
         missing_dates = find_missing_risk_dates(

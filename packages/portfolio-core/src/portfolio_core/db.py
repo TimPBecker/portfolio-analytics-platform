@@ -9,7 +9,7 @@ import re
 import json
 from urllib.parse import quote_plus
 from datetime import date
-from typing import Optional, List, Dict, Tuple, Any, Union
+from typing import Optional, List, Dict, Tuple, Any, Union, Set
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -735,8 +735,10 @@ def parse_benchmark_constituents(constituents_input: Any) -> Dict[str, float]:
                 raw_map[str(item).strip().upper()] = 1.0
     elif isinstance(constituents_input, str):
         raw_str = constituents_input.strip()
+        if not raw_str:
+            raise ValueError("Benchmark constituents input cannot be empty.")
         if raw_str.startswith("{") and raw_str.endswith("}"):
-            raw_map = {str(k).strip().upper(): float(v) for k, v in json.loads(raw_str).items() if float(v) > 0}
+            raw_map = {str(k).strip().upper(): float(v) for k, v in json.loads(raw_str).items()}
         elif ":" in raw_str or "," in raw_str:
             raw_map = {}
             for part in re.split(r"[,;]", raw_str):
@@ -762,6 +764,13 @@ def parse_benchmark_constituents(constituents_input: Any) -> Dict[str, float]:
             raw_map = {raw_str.upper(): 1.0}
     else:
         raise ValueError(f"Invalid constituents input: {constituents_input}")
+
+    if not raw_map:
+        raise ValueError("Benchmark constituents cannot be empty.")
+
+    for t, w in raw_map.items():
+        if w <= 0:
+            raise ValueError(f"Constituent weight for '{t}' must be strictly positive (got {w}).")
 
     total_w = sum(raw_map.values())
     if total_w <= 0:
@@ -2910,7 +2919,10 @@ def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -
     return bm_tx_df
 
 
-def calculate_and_store_daily_benchmark_values(engine: Optional[Engine] = None) -> Dict[str, Any]:
+def calculate_and_store_daily_benchmark_values(
+    engine: Optional[Engine] = None,
+    sync_transactions: bool = True
+) -> Dict[str, Any]:
     """
     Calculates daily benchmark valuations for every date in history by:
     1. Replaying cumulative shadow share positions per constituent from BENCHMARK_TRANSACTIONS.
@@ -2922,8 +2934,9 @@ def calculate_and_store_daily_benchmark_values(engine: Optional[Engine] = None) 
     eng = engine or get_engine()
     create_all_tables(eng)
 
-    # Ensure shadow benchmark transactions are generated first
-    generate_and_store_benchmark_transactions(engine=eng)
+    if sync_transactions:
+        # Ensure shadow benchmark transactions are generated first
+        generate_and_store_benchmark_transactions(engine=eng)
 
     with eng.connect() as conn:
         bm_tx_df = pd.read_sql(
@@ -3127,5 +3140,290 @@ def fetch_benchmark_transactions(
         df = pd.read_sql(text(query), conn, params=params)
 
     return df
+
+
+def check_benchmark_transactions_coverage(engine: Optional[Engine] = None) -> Dict[str, Any]:
+    """
+    Checks if for every transaction in TRANSACTIONS, the corresponding benchmark transactions
+    were made across all active benchmarks in BENCHMARKS.
+
+    Returns:
+        Dict containing:
+        - "is_synced": bool (True if all transactions have corresponding benchmark shadow trades)
+        - "missing_tx_ids": List[int] (IDs of transactions missing benchmark shadow trades)
+        - "earliest_missing_date": Optional[str] (YYYY-MM-DD of the earliest missing transaction, if any)
+        - "total_transactions": int
+        - "total_benchmarks": int
+        - "missing_count": int
+        - "orphan_tx_ids": List[int]
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    with eng.connect() as conn:
+        tx_df = pd.read_sql(
+            text("SELECT `ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY` FROM `TRANSACTIONS` ORDER BY `TRANSACTION_DATE` ASC, `ID` ASC"),
+            conn
+        )
+        bm_df = pd.read_sql(
+            text("SELECT `BENCHMARK_CODE` FROM `BENCHMARKS` ORDER BY `BENCHMARK_CODE` ASC"),
+            conn
+        )
+        bm_tx_df = pd.read_sql(
+            text("SELECT DISTINCT `ORIGINAL_TX_ID`, `BENCHMARK_CODE` FROM `BENCHMARK_TRANSACTIONS` WHERE `ORIGINAL_TX_ID` IS NOT NULL"),
+            conn
+        )
+
+    if tx_df.empty or bm_df.empty:
+        return {
+            "is_synced": True,
+            "missing_tx_ids": [],
+            "earliest_missing_date": None,
+            "total_transactions": len(tx_df),
+            "total_benchmarks": len(bm_df),
+            "missing_count": 0,
+            "orphan_tx_ids": [],
+        }
+
+    tx_df["TRANSACTION_DATE"] = pd.to_datetime(tx_df["TRANSACTION_DATE"]).dt.strftime("%Y-%m-%d")
+    all_tx_ids = set(tx_df["ID"].astype(int))
+    active_bms = set(bm_df["BENCHMARK_CODE"].astype(str))
+
+    bm_tx_by_orig: Dict[int, Set[str]] = {}
+    if not bm_tx_df.empty:
+        for _, r in bm_tx_df.iterrows():
+            try:
+                orig_id = int(r["ORIGINAL_TX_ID"])
+                bm_c = str(r["BENCHMARK_CODE"])
+                bm_tx_by_orig.setdefault(orig_id, set()).add(bm_c)
+            except (ValueError, TypeError):
+                continue
+
+    missing_tx_ids = []
+    missing_dates = []
+
+    for _, row in tx_df.iterrows():
+        tx_id = int(row["ID"])
+        tx_date = str(row["TRANSACTION_DATE"])
+        existing_bms = bm_tx_by_orig.get(tx_id, set())
+        if not active_bms.issubset(existing_bms):
+            missing_tx_ids.append(tx_id)
+            missing_dates.append(tx_date)
+
+    existing_orig_ids = set(bm_tx_by_orig.keys())
+    orphan_tx_ids = sorted(list(existing_orig_ids - all_tx_ids))
+
+    is_synced = (len(missing_tx_ids) == 0) and (len(orphan_tx_ids) == 0)
+    earliest_missing_date = min(missing_dates) if missing_dates else (min(tx_df["TRANSACTION_DATE"]) if not is_synced else None)
+
+    return {
+        "is_synced": is_synced,
+        "missing_tx_ids": missing_tx_ids,
+        "earliest_missing_date": earliest_missing_date,
+        "total_transactions": len(tx_df),
+        "total_benchmarks": len(bm_df),
+        "missing_count": len(missing_tx_ids),
+        "orphan_tx_ids": orphan_tx_ids,
+    }
+
+
+def regenerate_risk_numbers_from_date(
+    start_date: str,
+    engine: Optional[Engine] = None,
+    min_lookback: int = 260,
+    lookback_days: int = 260,
+    num_permutations: int = 100,
+    var_min_percentile: float = 0.01,
+    var_max_percentile: float = 0.99,
+    shapley_min_percentile: float = 0.99,
+    shapley_max_percentile: float = 0.99,
+) -> Dict[str, Any]:
+    """
+    Regenerates portfolio Value-at-Risk, Expected Shortfall (CVaR), and Shapley Value
+    risk contributions across all subsequent trading days starting from `start_date`
+    (inclusive, i.e., DATE >= start_date) following the addition or modification of transactions.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    with eng.connect() as conn:
+        dates_df = pd.read_sql(
+            text("SELECT DISTINCT `DATE` FROM `ASSET_PRICES` WHERE `DATE` >= :d ORDER BY `DATE` ASC"),
+            conn,
+            params={"d": start_date}
+        )
+
+    subsequent_dates = []
+    if not dates_df.empty:
+        subsequent_dates = sorted(pd.to_datetime(dates_df["DATE"]).dt.strftime("%Y-%m-%d").unique().tolist())
+
+    if not subsequent_dates:
+        with eng.connect() as conn:
+            pv_dates = pd.read_sql(
+                text("SELECT DISTINCT `DATE` FROM `PORTFOLIO_VALUES` WHERE `DATE` >= :d ORDER BY `DATE` ASC"),
+                conn,
+                params={"d": start_date}
+            )
+        if not pv_dates.empty:
+            subsequent_dates = sorted(pd.to_datetime(pv_dates["DATE"]).dt.strftime("%Y-%m-%d").unique().tolist())
+
+    if not subsequent_dates:
+        return {
+            "dates_count": 0,
+            "dates_recomputed": [],
+            "var_records_upserted": 0,
+            "contrib_records_upserted": 0,
+            "message": f"No trading dates found on or after {start_date}."
+        }
+
+    prices_gbp = fetch_historical_prices_gbp(engine=eng)
+    holdings_grid, all_dates = fetch_portfolio_positions_grid(engine=eng)
+
+    if prices_gbp.empty or holdings_grid.empty:
+        return {
+            "dates_count": 0,
+            "dates_recomputed": [],
+            "var_records_upserted": 0,
+            "contrib_records_upserted": 0,
+            "message": "Price matrix or holdings grid is empty."
+        }
+
+    dates_to_compute = [d for d in subsequent_dates if d in holdings_grid.index]
+    if not dates_to_compute:
+        return {
+            "dates_count": 0,
+            "dates_recomputed": [],
+            "var_records_upserted": 0,
+            "contrib_records_upserted": 0,
+            "message": "No computable dates found in holdings grid."
+        }
+
+    from portfolio_core.analytics.var import (
+        compute_historical_risk_timeline,
+        evaluate_portfolio_risk_models,
+        ShapleyRiskAttributor,
+    )
+
+    var_rows, contrib_rows = compute_historical_risk_timeline(
+        prices_gbp=prices_gbp,
+        holdings_grid=holdings_grid,
+        dates_to_compute=dates_to_compute,
+        min_lookback=min_lookback,
+        lookback_days=lookback_days,
+        num_permutations=num_permutations,
+        var_min_percentile=var_min_percentile,
+        var_max_percentile=var_max_percentile,
+        shapley_min_percentile=shapley_min_percentile,
+        shapley_max_percentile=shapley_max_percentile,
+    )
+
+    var_count = store_var_records(var_rows, engine=eng) if var_rows else 0
+    contrib_count = store_risk_contributions_records(contrib_rows, engine=eng) if contrib_rows else 0
+
+    # Also evaluate latest date to update PORTFOLIO_SCENARIO_PNL
+    latest_asof = dates_to_compute[-1]
+    positions = fetch_portfolio_positions(asof=latest_asof, engine=eng)
+    if positions and not prices_gbp.empty:
+        try:
+            attributor = ShapleyRiskAttributor(num_permutations=num_permutations)
+            _, _, scenario_records = evaluate_portfolio_risk_models(
+                positions=positions,
+                prices_gbp=prices_gbp,
+                asof_date=latest_asof,
+                attributor=attributor,
+                var_min_percentile=var_min_percentile,
+                var_max_percentile=var_max_percentile,
+                shapley_min_percentile=shapley_min_percentile,
+                shapley_max_percentile=shapley_max_percentile,
+                lookback_days=lookback_days,
+            )
+            store_scenario_pnl_records(scenario_records, engine=eng)
+        except Exception:
+            pass
+
+    return {
+        "start_date": start_date,
+        "dates_recomputed": dates_to_compute,
+        "dates_count": len(dates_to_compute),
+        "var_records_upserted": var_count,
+        "contrib_records_upserted": contrib_count,
+        "latest_asof_date": latest_asof,
+    }
+
+
+def sync_benchmark_transactions_and_risk(
+    engine: Optional[Engine] = None,
+    force: bool = False,
+    min_lookback: int = 260,
+    lookback_days: int = 260,
+    num_permutations: int = 100,
+    var_min_percentile: float = 0.01,
+    var_max_percentile: float = 0.99,
+    shapley_min_percentile: float = 0.99,
+    shapley_max_percentile: float = 0.99,
+) -> Dict[str, Any]:
+    """
+    Checks if for every transaction in TRANSACTIONS, the corresponding benchmark transactions were made.
+    If not (or if force=True):
+      1. Generates shadow benchmark transactions across all active benchmarks in BENCHMARK_TRANSACTIONS.
+      2. Regenerates daily benchmark valuations in BENCHMARK_VALUES.
+      3. Regenerates daily portfolio values in PORTFOLIO_VALUES.
+      4. Regenerates portfolio risk numbers (PORTFOLIO_VAR, PORTFOLIO_RISK_CONTRIBUTIONS, PORTFOLIO_SCENARIO_PNL)
+         for all subsequent days starting from the earliest missing transaction date.
+    """
+    eng = engine or get_engine()
+    coverage = check_benchmark_transactions_coverage(engine=eng)
+
+    if coverage["is_synced"] and not force:
+        return {
+            "synced": True,
+            "regenerated": False,
+            "missing_tx_count": 0,
+            "missing_tx_ids": [],
+            "earliest_missing_date": None,
+            "message": "All transactions have corresponding benchmark transactions."
+        }
+
+    earliest_date = coverage.get("earliest_missing_date")
+    if not earliest_date:
+        with eng.connect() as conn:
+            min_dt = conn.execute(text("SELECT MIN(`TRANSACTION_DATE`) FROM `TRANSACTIONS`")).scalar()
+            earliest_date = str(min_dt)[:10] if min_dt else "1970-01-01"
+
+    # 1. Regenerate shadow benchmark transactions
+    bm_tx_df = generate_and_store_benchmark_transactions(engine=eng)
+
+    # 2. Regenerate daily benchmark valuations
+    bm_val_res = calculate_and_store_daily_benchmark_values(engine=eng, sync_transactions=False)
+
+    # 3. Backfill portfolio daily values for all dates
+    pv_res = calculate_and_store_daily_portfolio_values(backfill_days=-1, engine=eng)
+
+    # 4. Regenerate risk numbers for subsequent days
+    risk_res = regenerate_risk_numbers_from_date(
+        start_date=earliest_date,
+        engine=eng,
+        min_lookback=min_lookback,
+        lookback_days=lookback_days,
+        num_permutations=num_permutations,
+        var_min_percentile=var_min_percentile,
+        var_max_percentile=var_max_percentile,
+        shapley_min_percentile=shapley_min_percentile,
+        shapley_max_percentile=shapley_max_percentile,
+    )
+
+    return {
+        "synced": True,
+        "regenerated": True,
+        "missing_tx_count": coverage["missing_count"],
+        "missing_tx_ids": coverage["missing_tx_ids"],
+        "earliest_missing_date": earliest_date,
+        "benchmark_tx_count": len(bm_tx_df),
+        "benchmark_values_stored": bm_val_res.get("records_stored", 0),
+        "portfolio_values_stored": pv_res.get("records_stored", 0),
+        "risk_stats": risk_res,
+        "message": f"Successfully synced benchmark transactions and regenerated benchmark values and risk numbers for subsequent days from {earliest_date}."
+    }
+
 
 
