@@ -105,4 +105,9 @@ ops:
       top_risk_contributors_n: 5    # Top risk contributor positions to include in table
       top_movers_n: 5               # Top daily position value movers (|ΔValue|) to include in caption
 
+      # Reliability & Network resiliency:
+      request_timeout: 60           # Request timeout in seconds for Telegram Bot API uploads (default: 60)
+      max_retries: 3                # Max retry attempts on transient network timeouts or errors (default: 3)
+      retry_delay_seconds: 3.0      # Initial retry delay in seconds before exponential backoff (default: 3.0)
+
 

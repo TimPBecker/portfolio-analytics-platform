@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch, MagicMock
+import requests
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
@@ -327,6 +328,95 @@ class TestReportingModule(unittest.TestCase):
         # First call was sendPhoto, second call was sendMessage
         self.assertIn("sendPhoto", mock_post.call_args_list[0][0][0])
         self.assertIn("sendMessage", mock_post.call_args_list[1][0][0])
+
+    @patch("requests.post")
+    def test_send_telegram_photo_retry_on_timeout_success(self, mock_post):
+        """Test transient ReadTimeout succeeds on retry attempt with exponential backoff."""
+        mock_success = MagicMock()
+        mock_success.json.return_value = {"ok": True, "result": {"message_id": 44}}
+        mock_success.raise_for_status.return_value = None
+
+        # First call times out, second call succeeds
+        mock_post.side_effect = [
+            requests.exceptions.ReadTimeout("Connection timed out (read timeout=60)"),
+            mock_success
+        ]
+
+        res = send_telegram_photo(
+            token="dummy_token_123",
+            chat_id="987654321",
+            photo_bytes=b"\x89PNG\r\n\x1a\nfake_image_content",
+            caption="<b>Retry Test</b>",
+            retries=3,
+            retry_delay=0.001
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["result"]["message_id"], 44)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("requests.post")
+    def test_send_telegram_photo_retry_exhausted(self, mock_post):
+        """Test persistent network timeout raises exception after exhausting configured retries."""
+        mock_post.side_effect = requests.exceptions.ReadTimeout("Persistent timeout")
+
+        with self.assertRaises(requests.exceptions.ReadTimeout):
+            send_telegram_photo(
+                token="dummy_token_123",
+                chat_id="987654321",
+                photo_bytes=b"\x89PNG\r\n\x1a\nfake_image_content",
+                caption="<b>Exhaustion Test</b>",
+                retries=3,
+                retry_delay=0.001
+            )
+        self.assertEqual(mock_post.call_count, 3)
+
+    @patch("requests.post")
+    def test_send_telegram_photo_no_retry_on_client_error(self, mock_post):
+        """Test 4xx client errors (e.g. 400 Bad Request, chat not found) fail immediately without retrying."""
+        mock_err_resp = MagicMock(status_code=400)
+        mock_err_resp.json.return_value = {"ok": False, "description": "Bad Request: chat not found"}
+        mock_err = requests.exceptions.HTTPError("Bad Request", response=mock_err_resp)
+        mock_post.side_effect = mock_err
+
+        with self.assertRaises(requests.exceptions.HTTPError):
+            send_telegram_photo(
+                token="dummy_token_123",
+                chat_id="987654321",
+                photo_bytes=b"\x89PNG\r\n\x1a\nfake_image_content",
+                caption="<b>Client Error Test</b>",
+                retries=3,
+                retry_delay=0.001
+            )
+        # Should not retry 400 Bad Request
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("requests.post")
+    def test_send_telegram_photo_retry_on_server_error_and_rate_limit(self, mock_post):
+        """Test retrying on 502 Bad Gateway and 429 Rate Limit."""
+        mock_502_resp = MagicMock(status_code=502)
+        mock_err_502 = requests.exceptions.HTTPError("Bad Gateway", response=mock_502_resp)
+
+        mock_429_resp = MagicMock(status_code=429)
+        mock_429_resp.json.return_value = {"parameters": {"retry_after": 0.01}}
+        mock_err_429 = requests.exceptions.HTTPError("Too Many Requests", response=mock_429_resp)
+
+        mock_success = MagicMock(status_code=200)
+        mock_success.json.return_value = {"ok": True, "result": {"message_id": 45}}
+        mock_success.raise_for_status.return_value = None
+
+        mock_post.side_effect = [mock_err_502, mock_err_429, mock_success]
+
+        res = send_telegram_photo(
+            token="dummy_token_123",
+            chat_id="987654321",
+            photo_bytes=b"\x89PNG\r\n\x1a\nfake_image_content",
+            caption="<b>Rate Limit / 5xx Test</b>",
+            retries=4,
+            retry_delay=0.001
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["result"]["message_id"], 45)
+        self.assertEqual(mock_post.call_count, 3)
 
     @patch("requests.post")
     def test_send_telegram_report_broadcast(self, mock_post):

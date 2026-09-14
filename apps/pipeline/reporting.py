@@ -7,11 +7,15 @@ and delivers them with formatted summary captions to configured Telegram recipie
 import io
 import os
 import math
+import time
+import logging
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import numpy as np
 import requests
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 # Headless matplotlib backend for headless server / container environments
 import matplotlib
@@ -683,17 +687,86 @@ def format_telegram_caption(
     return "\n".join(caption_lines)
 
 
+def _post_with_retry(
+    url: str,
+    *,
+    data: Optional[Dict[str, Any]] = None,
+    json: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    timeout: int = 60,
+    retries: int = 3,
+    retry_delay: float = 3.0,
+    backoff_factor: float = 2.0,
+) -> requests.Response:
+    """
+    Executes an HTTP POST request with automatic retry logic and exponential backoff
+    for transient network errors (timeouts, connection drops) and server rate limits / errors (429, 5xx).
+    """
+    current_delay = retry_delay
+    last_exception = None
+
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            resp = requests.post(url, data=data, json=json, files=files, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exception = e
+            if attempt < retries:
+                logger.warning(
+                    f"Telegram API request to {url} failed with network error (attempt {attempt}/{retries}): {e}. "
+                    f"Retrying in {current_delay:.1f}s..."
+                )
+                time.sleep(current_delay)
+                current_delay *= backoff_factor
+            else:
+                logger.error(
+                    f"Telegram API request to {url} failed after {retries} attempts: {e}"
+                )
+                raise
+        except requests.exceptions.HTTPError as e:
+            last_exception = e
+            status_code = e.response.status_code if e.response is not None else 0
+            if status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                sleep_time = current_delay
+                if status_code == 429 and e.response is not None:
+                    try:
+                        resp_json = e.response.json()
+                        retry_after = resp_json.get("parameters", {}).get("retry_after")
+                        if retry_after:
+                            sleep_time = max(float(retry_after), 1.0)
+                    except Exception:
+                        pass
+                logger.warning(
+                    f"Telegram API request to {url} returned HTTP {status_code} (attempt {attempt}/{retries}). "
+                    f"Retrying in {sleep_time:.1f}s..."
+                )
+                time.sleep(sleep_time)
+                current_delay *= backoff_factor
+            else:
+                logger.error(f"Telegram API request to {url} failed with HTTP {status_code}: {e}")
+                raise
+
+    if last_exception:
+        raise last_exception
+    raise RuntimeError(f"Request to {url} failed with unknown error.")
+
+
 def send_telegram_photo(
     token: str,
     chat_id: str,
     photo_bytes: bytes,
     caption: str,
-    timeout: int = 30
+    timeout: int = 60,
+    retries: int = 3,
+    retry_delay: float = 3.0,
+    backoff_factor: float = 2.0
 ) -> Dict[str, Any]:
     """
     Sends a photo with HTML caption to a Telegram chat using the Telegram Bot API.
     If the caption exceeds Telegram's 1024 character limit for sendPhoto, delivers
     the photo and sends the complete caption text via sendMessage (which supports up to 4096 characters).
+    Includes automatic retries with exponential backoff on transient network timeouts and server errors.
     """
     if not token:
         raise ValueError("Telegram Bot Token is required to send notifications.")
@@ -710,22 +783,38 @@ def send_telegram_photo(
             "caption": caption,
             "parse_mode": "HTML"
         }
-        resp = requests.post(photo_url, data=data, files=files, timeout=timeout)
-        resp.raise_for_status()
+        resp = _post_with_retry(
+            photo_url,
+            data=data,
+            files=files,
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+            backoff_factor=backoff_factor,
+        )
         return resp.json()
     else:
         # Photo caption limit is 1024 chars: send photo first, then full caption via sendMessage
         data = {"chat_id": clean_cid}
-        resp_photo = requests.post(photo_url, data=data, files=files, timeout=timeout)
-        resp_photo.raise_for_status()
+        resp_photo = _post_with_retry(
+            photo_url,
+            data=data,
+            files=files,
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+            backoff_factor=backoff_factor,
+        )
 
         msg_url = f"https://api.telegram.org/bot{token}/sendMessage"
-        resp_msg = requests.post(
+        resp_msg = _post_with_retry(
             msg_url,
             json={"chat_id": clean_cid, "text": caption, "parse_mode": "HTML"},
-            timeout=timeout
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+            backoff_factor=backoff_factor,
         )
-        resp_msg.raise_for_status()
         return resp_msg.json()
 
 
@@ -834,7 +923,11 @@ def send_telegram_report(
     top_risk_contributors_n: int = 5,
     top_movers_n: int = 5,
     engine=None,
-    output_chart_path: Optional[str] = None
+    output_chart_path: Optional[str] = None,
+    timeout: int = 60,
+    retries: int = 3,
+    retry_delay: float = 3.0,
+    backoff_factor: float = 2.0,
 ) -> Dict[str, Any]:
     """
     Full reporting pipeline:
@@ -843,7 +936,7 @@ def send_telegram_report(
        as of `asof_date` (or latest date).
     2. Renders the multi-panel chart (including the Top 5 Risk Contributors table).
     3. Builds the HTML formatted caption with valuation, top movers, dividends, risk breakdown, and contributors.
-    4. Delivers the chart and caption to all configured Telegram recipient chat IDs.
+    4. Delivers the chart and caption to all configured Telegram recipient chat IDs with automatic retries.
     """
     bot_token = token or os.getenv("TELEGRAM_BOT_TOKEN")
     if not bot_token:
@@ -872,9 +965,20 @@ def send_telegram_report(
     failed = []
     for cid in clean_recipients:
         try:
-            res = send_telegram_photo(token=bot_token, chat_id=cid, photo_bytes=report["chart_bytes"], caption=report["caption"])
+            res = send_telegram_photo(
+                token=bot_token,
+                chat_id=cid,
+                photo_bytes=report["chart_bytes"],
+                caption=report["caption"],
+                timeout=timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+                backoff_factor=backoff_factor,
+            )
             success.append(cid)
+            logger.info(f"Successfully delivered Telegram report to recipient {cid}.")
         except Exception as e:
+            logger.error(f"Failed to deliver Telegram report to recipient {cid}: {e}")
             failed.append({"chat_id": cid, "error": str(e)})
 
     return {
@@ -903,7 +1007,11 @@ def generate_reports_for_dates(
     confidence_levels: Optional[List[float]] = None,
     top_risk_contributors_n: int = 5,
     top_movers_n: int = 5,
-    engine=None
+    engine=None,
+    timeout: int = 60,
+    retries: int = 3,
+    retry_delay: float = 3.0,
+    backoff_factor: float = 2.0,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Generates reports for a sequence or list of historical dates.
@@ -928,7 +1036,11 @@ def generate_reports_for_dates(
                 top_risk_contributors_n=top_risk_contributors_n,
                 top_movers_n=top_movers_n,
                 engine=engine,
-                output_chart_path=chart_path
+                output_chart_path=chart_path,
+                timeout=timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+                backoff_factor=backoff_factor,
             )
         else:
             res = generate_report(
