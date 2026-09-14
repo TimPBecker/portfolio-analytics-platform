@@ -16,6 +16,7 @@ from dagster import (
     MetadataValue,
     ScheduleDefinition,
     define_asset_job,
+    RetryPolicy,
 )
 from dask.distributed import Client
 import dask
@@ -672,6 +673,9 @@ class ReportingConfig(Config):
     - confidence_levels: Confidence levels to include in the VaR chart (default: [0.01, 0.05, 0.95, 0.99]).
     - top_risk_contributors_n: Number of top Vol-Scaled VaR risk contributors to include in the table (default: 5).
     - top_movers_n: Number of top daily position value movers (|ΔValue|) to include in caption (default: 5).
+    - request_timeout: Request timeout in seconds for Telegram API uploads (default: 60).
+    - max_retries: Maximum retry attempts for transient network timeouts or server errors (default: 3).
+    - retry_delay_seconds: Initial retry delay in seconds before exponential backoff (default: 3.0).
     """
     enabled: bool = False
     recipients: list[str] = []
@@ -682,9 +686,15 @@ class ReportingConfig(Config):
     confidence_levels: list[float] = [0.01, 0.05, 0.95, 0.99]
     top_risk_contributors_n: int = 5
     top_movers_n: int = 5
+    request_timeout: int = 60
+    max_retries: int = 3
+    retry_delay_seconds: float = 3.0
 
 
-@asset(deps=[portfolio_value_at_risk])
+@asset(
+    deps=[portfolio_value_at_risk],
+    retry_policy=RetryPolicy(max_retries=2, delay=30),
+)
 def portfolio_telegram_report(config: ReportingConfig, db: DatabaseResource):
     """
     Final pipeline step: Generates dual-panel visual charts of recent portfolio values
@@ -739,12 +749,26 @@ def portfolio_telegram_report(config: ReportingConfig, db: DatabaseResource):
         top_risk_contributors_n=config.top_risk_contributors_n,
         top_movers_n=config.top_movers_n,
         engine=engine,
-        output_chart_path="/tmp/portfolio_report_latest.png"
+        output_chart_path="/tmp/portfolio_report_latest.png",
+        timeout=config.request_timeout,
+        retries=config.max_retries,
+        retry_delay=config.retry_delay_seconds,
     )
 
     delivered_cnt = len(result["delivered_recipients"])
     failed_cnt = len(result["failed_recipients"])
-    logger.info(f"Telegram report broadcast complete: {delivered_cnt} delivered, {failed_cnt} failed.")
+    
+    if failed_cnt > 0:
+        logger.error(
+            f"Telegram report broadcast failure ({failed_cnt}/{len(recipients)} failed): {result['failed_recipients']}"
+        )
+    else:
+        logger.info(f"Telegram report broadcast complete: {delivered_cnt} delivered, {failed_cnt} failed.")
+
+    if delivered_cnt == 0 and len(recipients) > 0:
+        raise RuntimeError(
+            f"Failed to deliver Telegram report to all configured recipients: {result['failed_recipients']}"
+        )
     
     clean_md_caption = (
         result["caption"]
