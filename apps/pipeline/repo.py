@@ -15,6 +15,7 @@ from dagster import (
     Output,
     MetadataValue,
     ScheduleDefinition,
+    DefaultScheduleStatus,
     define_asset_job,
     RetryPolicy,
 )
@@ -47,6 +48,7 @@ from portfolio_core.db import (
     store_scenario_pnl_records,
     store_var_records,
     store_risk_contributions_records,
+    record_processed_date,
 )
 from portfolio_core.analytics.var import (
     HistoricalVaR,
@@ -643,6 +645,13 @@ def portfolio_value_at_risk(config: RiskConfig, db: DatabaseResource):
     
     logger.info(f"Value-at-Risk calculated for {asof} ({len(summary_df)} percentile models evaluated).")
     
+    # Record successfully completed date in PROCESSED_DATES before telegram report
+    try:
+        record_processed_date(asof, status="SUCCESS", engine=db.get_engine())
+        logger.info(f"Recorded successfully processed date {asof} in PROCESSED_DATES table.")
+    except Exception as e:
+        logger.warning(f"Could not record processed date {asof} in PROCESSED_DATES: {e}")
+    
     metadata = {
         "Status": "VaR calculated and stored in remote MariaDB PORTFOLIO_VAR table",
         "Valuation Date": asof,
@@ -814,6 +823,7 @@ daily_portfolio_schedule = ScheduleDefinition(
     job=portfolio_job,
     cron_schedule="30 21 * * 1-5",
     execution_timezone="Europe/London",
+    default_status=DefaultScheduleStatus.RUNNING,
 )
 
 if _db_type == "sqlite":
