@@ -52,8 +52,10 @@ portfolio-analytics-platform/
 
 ### 1. Clone & Set Up Environment
 
+#### Linux / macOS
 ```bash
-cd /home/tim/Projects/portfolio-analytics-platform
+git clone <repository_url>
+cd portfolio-analytics-platform
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -65,10 +67,40 @@ pip install -r apps/pipeline/requirements.txt
 pip install -r apps/dashboard/requirements.txt
 ```
 
+#### Windows (PowerShell)
+```powershell
+git clone <repository_url>
+cd portfolio-analytics-platform
+python -m venv .venv
+
+# If script execution is restricted in PowerShell, run:
+# Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.venv\Scripts\Activate.ps1
+
+# Install the shared core library in editable mode
+pip install -e packages/portfolio-core
+
+# Install pipeline & dashboard dependencies
+pip install -r apps/pipeline/requirements.txt
+pip install -r apps/dashboard/requirements.txt
+```
+
+*(For health warnings, prerequisites, and troubleshooting on Windows, see the [Windows Setup & Support (Beta)](#-windows-setup--support-beta) section below).*
+
 ### 2. Configure Environment Variables
 
+**Linux / macOS:**
 ```bash
 cp .env.example .env
+```
+
+**Windows (PowerShell / Command Prompt):**
+```powershell
+# PowerShell:
+Copy-Item .env.example .env
+
+# Command Prompt (cmd.exe):
+copy .env.example .env
 ```
 
 Edit `.env` to match your selected database backend (see [Database Setup & Configuration](#-database-setup--configuration) below for details).
@@ -238,13 +270,149 @@ python -m portfolio_core.db --delete-after 2026-09-24
 
 ---
 
+## 🪟 Windows Setup & Support (Beta)
+
+> [!WARNING]
+> ### ⚠️ Health Warning: Windows Setup is in BETA & Not Fully Tested
+> - **Primary Target**: The Portfolio Analytics Platform is engineered and tested primarily on **Linux** (Debian, Ubuntu, and containerized Linux via Docker).
+> - **Beta Status**: Native Windows operation (running directly under Windows 10 or 11 using PowerShell or Command Prompt) is currently in **Beta** and has **not been fully tested** across all Windows editions, execution environments, or terminal configurations.
+> - **Potential Friction Points**: While core financial mathematics, the Streamlit dashboard, and SQLite / MariaDB database connectivity are cross-platform, native Windows users may encounter differences in Python execution policies, path resolution formatting, and Dask / Dagster multiprocessing (`spawn` vs `fork`).
+> - **Recommended Alternative (WSL2)**: If you are developing on a Windows machine, running inside **WSL2 (Windows Subsystem for Linux - Ubuntu)** or **Docker Desktop** is strongly recommended as it provides 100% feature parity with the production Linux environment.
+
+---
+
+### Native Windows Prerequisites
+
+1. **Python 3.10+**: Download from [python.org](https://www.python.org/downloads/windows/).
+   - ⚠️ **Important**: Ensure the installer option **"Add python.exe to PATH"** is checked.
+2. **Git for Windows**: Download from [git-scm.com](https://git-scm.com/).
+3. **PowerShell 7+ or Windows Terminal**: Highly recommended over legacy Command Prompt (`cmd.exe`).
+
+---
+
+### Step-by-Step Native Windows Setup
+
+#### 1. Create and Activate Virtual Environment
+
+Open PowerShell and navigate to the project directory:
+
+```powershell
+cd path\to\portfolio-analytics-platform
+
+# Create virtual environment
+python -m venv .venv
+```
+
+By default, Windows PowerShell restricts running scripts (`PSSecurityException`). If you encounter an execution policy error when activating the environment, run:
+
+```powershell
+# Temporarily permit signed scripts in the current PowerShell process:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
+# Activate the virtual environment:
+.venv\Scripts\Activate.ps1
+```
+
+*(If using legacy `cmd.exe`, run `.venv\Scripts\activate.bat` instead).*
+
+#### 2. Install Packages
+
+```powershell
+pip install -e packages\portfolio-core
+pip install -r apps\pipeline\requirements.txt
+pip install -r apps\dashboard\requirements.txt
+```
+
+> [!NOTE]
+> All core dependencies (`numpy`, `pandas`, `scipy`, `statsmodels`, `SQLAlchemy`, `PyMySQL`, `streamlit`, `plotly`) provide pre-compiled Windows binary wheels (`win_amd64`) on PyPI, and `pymysql` is pure Python. Microsoft Visual C++ Build Tools are **not required** for standard setup.
+
+#### 3. Configure Environment
+
+Copy the example environment file:
+
+```powershell
+# PowerShell:
+Copy-Item .env.example .env
+
+# Command Prompt (cmd.exe):
+copy .env.example .env
+```
+
+Because `portfolio_core.config` automatically parses `.env` files via `python-dotenv`, you can define all credentials and settings directly in `.env` without setting system environment variables.
+
+---
+
+### Windows Specific Nuances & Health Warnings
+
+#### 1. SQLite Database Path Formatting
+- **Relative Paths (Default)**: Relative paths such as `sqlite_path: "stocks.s3db"` in `config.yaml` work without modification.
+- **Absolute Paths**: If you configure an absolute path on Windows, do **NOT** use unescaped backslashes (`\`). SQLAlchemy requires forward slashes (`/`):
+  ```yaml
+  # ❌ Incorrect:
+  sqlite_path: "C:\Users\username\portfolio\stocks.s3db"
+
+  # ✅ Correct:
+  sqlite_path: "C:/Users/username/portfolio/stocks.s3db"
+  ```
+
+#### 2. Shell Environment Variables
+Setting shell environment variables manually in Windows requires different syntax:
+- **PowerShell**: `$env:PORTFOLIO_ENV="development"`
+- **Command Prompt**: `set PORTFOLIO_ENV=development`
+*(Recommendation: Always set `PORTFOLIO_ENV=development` or `PORTFOLIO_ENV=production` directly inside your `.env` file instead).*
+
+#### 3. Dask & Dagster Multiprocessing (`spawn` vs `fork`)
+- Linux environments spawn child processes using `fork()`, whereas Windows strictly uses `spawn()`.
+- If Dagster pipeline tasks hang or terminate unexpectedly during parallel execution on native Windows, set Dagster to single-process execution or run the pipeline inside WSL2 / Docker.
+
+---
+
+### Windows Quick-Reference Command Table
+
+| Action | Linux / macOS | Windows (PowerShell) |
+| :--- | :--- | :--- |
+| **Activate Virtualenv** | `source .venv/bin/activate` | `.venv\Scripts\Activate.ps1` |
+| **Initialize Tables** | `python -m portfolio_core.db --init-tables` | `python -m portfolio_core.db --init-tables` |
+| **Run Unit Tests** | `PORTFOLIO_ENV=test TEST_MODE=1 pytest` | `$env:PORTFOLIO_ENV="test"; $env:TEST_MODE="1"; pytest` |
+| **Run Streamlit Dashboard** | `cd apps/dashboard && streamlit run app.py` | `cd apps\dashboard; streamlit run app.py` |
+| **Run Dagster Pipeline** | `cd apps/pipeline && dagster dev -f repo.py -p 3000` | `cd apps\pipeline; dagster dev -f repo.py -p 3000` |
+
+---
+
+### 🐧 Recommended Alternative: Running via WSL2 (Ubuntu)
+
+For Windows developers seeking zero configuration friction and 100% production parity:
+
+1. Open PowerShell as Administrator and run:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+2. Restart your computer if prompted, and open the new **Ubuntu** terminal.
+3. Clone the repository and follow the standard [Linux Quickstart](#-quickstart--installation):
+   ```bash
+   git clone <repo-url>
+   cd portfolio-analytics-platform
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -e packages/portfolio-core
+   pip install -r apps/pipeline/requirements.txt
+   pip install -r apps/dashboard/requirements.txt
+   streamlit run apps/dashboard/app.py
+   ```
+4. Access the dashboard from any Windows browser (Chrome, Edge, Firefox) at `http://localhost:8501`. WSL2 automatically forwards localhost ports to the Windows host!
+
+---
+
 ## 🧪 Running Unit & Integration Tests
 
 The repository includes a comprehensive test suite with over **100 automated tests** covering core analytics, empirical distributions, VaR backtesting diagnostics, benchmark synchronization, database isolation, Dagster reporting, and Streamlit UI components:
 
 ```bash
-# Run the complete test suite:
+# Run the complete test suite (Linux / macOS):
 pytest -v
+
+# Run the complete test suite (Windows PowerShell):
+$env:PORTFOLIO_ENV="test"; $env:TEST_MODE="1"; pytest -v
 
 # Run tests for shared analytics & database core:
 pytest -v packages/portfolio-core/tests
@@ -265,16 +433,30 @@ pytest -v apps/dashboard/tests
 
 ### Launch Streamlit Dashboard
 
+**Linux / macOS:**
 ```bash
 cd apps/dashboard
+streamlit run app.py
+```
+
+**Windows (PowerShell):**
+```powershell
+cd apps\dashboard
 streamlit run app.py
 ```
 *Access in browser at `http://localhost:8501`.*
 
 ### Launch Dagster Pipeline Webserver
 
+**Linux / macOS:**
 ```bash
 cd apps/pipeline
+dagster dev -f repo.py -p 3000
+```
+
+**Windows (PowerShell):**
+```powershell
+cd apps\pipeline
 dagster dev -f repo.py -p 3000
 ```
 *Access Dagster UI at `http://localhost:3000`.*
