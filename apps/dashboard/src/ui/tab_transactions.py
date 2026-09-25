@@ -19,7 +19,9 @@ from portfolio_core.db import (
     fetch_and_store_ticker,
     fetch_and_store_fx_rate,
     calculate_and_store_daily_portfolio_values,
-    calculate_and_store_daily_benchmark_values
+    calculate_and_store_daily_benchmark_values,
+    get_latest_processed_date,
+    delete_data_after_date
 )
 
 from sqlalchemy.engine import Engine
@@ -192,8 +194,11 @@ def render_tab_transactions(
                     try:
                         fetch_and_store_ticker(ticker=ticker_input, engine=engine)
                         fetch_and_store_fx_rate(from_curr="USD", engine=engine)
+                        latest_proc = get_latest_processed_date(engine=engine)
+                        if latest_proc:
+                            delete_data_after_date(latest_proc, engine=engine)
                         calculate_and_store_daily_portfolio_values(backfill_days=30, engine=engine)
-                        calculate_and_store_daily_benchmark_values(engine=engine)
+                        calculate_and_store_daily_benchmark_values(engine=engine, asof_date=latest_proc)
                     except Exception as e:
                         st.caption(f"Price sync note: {e}")
 

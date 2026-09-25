@@ -8,7 +8,7 @@ import os
 import re
 import json
 from urllib.parse import quote_plus
-from datetime import date
+from datetime import date, timedelta, datetime
 from typing import Optional, List, Dict, Tuple, Any, Union, Set
 import pandas as pd
 import numpy as np
@@ -449,6 +449,13 @@ def create_all_tables(engine=None):
                 PRIMARY KEY (`DATE`, `BENCHMARK_CODE`),
                 FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `PROCESSED_DATES` (
+                `DATE` TEXT PRIMARY KEY,
+                `STATUS` TEXT NOT NULL DEFAULT 'SUCCESS',
+                `COMPLETED_AT` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             """
         ]
     else:
@@ -615,6 +622,13 @@ def create_all_tables(engine=None):
                 PRIMARY KEY (`DATE`, `BENCHMARK_CODE`),
                 CONSTRAINT `fk_bm_val_code` FOREIGN KEY (`BENCHMARK_CODE`) REFERENCES `BENCHMARKS` (`BENCHMARK_CODE`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS `PROCESSED_DATES` (
+                `DATE` DATE PRIMARY KEY,
+                `STATUS` VARCHAR(50) NOT NULL DEFAULT 'SUCCESS',
+                `COMPLETED_AT` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
         ]
     
@@ -698,6 +712,19 @@ def create_all_tables(engine=None):
                         text("INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`) VALUES (:code, :name, :desc, :constituents)"),
                         bm
                     )
+                conn.commit()
+        except Exception:
+            pass
+
+        # Seed default processed dates if table is empty (weekdays 2024-01-01 to 2026-09-24)
+        try:
+            pd_count = conn.execute(text("SELECT COUNT(*) FROM `PROCESSED_DATES`")).scalar()
+            if not pd_count:
+                b_dates = pd.bdate_range(start="2024-01-01", end="2026-09-24").strftime("%Y-%m-%d").tolist()
+                verb = "INSERT OR IGNORE" if is_sqlite else "INSERT IGNORE"
+                sql = f"{verb} INTO `PROCESSED_DATES` (`DATE`, `STATUS`) VALUES (:d, 'SUCCESS')"
+                for d_str in b_dates:
+                    conn.execute(text(sql), {"d": d_str})
                 conn.commit()
         except Exception:
             pass
@@ -2124,6 +2151,7 @@ PIPELINE_TABLES_TO_CLEAR = [
     "CASHFLOWS",
     "FX_RATES",
     "ASSET_PRICES",
+    "PROCESSED_DATES",
 ]
 
 
@@ -2190,6 +2218,7 @@ TABLES_WITH_DATE_COLUMNS: Dict[str, str] = {
     "CASHFLOWS": "DATE",
     "ASSET_PRICES": "DATE",
     "FX_RATES": "DATE",
+    "PROCESSED_DATES": "DATE",
     "TRANSACTIONS": "TRANSACTION_DATE",
 }
 
@@ -2285,6 +2314,416 @@ def delete_data_after_date(
             conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
 
     return results
+
+
+def delete_data_for_date(
+    target_date: Union[str, date, Any],
+    engine: Optional[Engine] = None,
+    include_transactions: bool = False,
+    tables: Optional[List[str]] = None,
+    dry_run: bool = False,
+) -> Dict[str, int]:
+    """
+    Deletes (or previews) records with date equal to target_date across database tables.
+
+    Parameters:
+        target_date: Target date as 'YYYY-MM-DD' string, datetime.date, or datetime.datetime.
+                     Records with date == target_date will be deleted.
+        engine: Optional SQLAlchemy engine. Defaults to get_engine().
+        include_transactions: If False (default), the manual TRANSACTIONS and shadow BENCHMARK_TRANSACTIONS
+                              tables are preserved.
+                              If True, transactions with date == target_date are also deleted.
+        tables: Optional list of table names to target. If None, targets all relevant tables.
+        dry_run: If True, only counts matching rows without executing any DELETE.
+
+    Returns:
+        Dict mapping table names to the number of rows deleted (or matching, if dry_run=True).
+    """
+    if hasattr(target_date, "strftime"):
+        date_str = target_date.strftime("%Y-%m-%d")
+    elif isinstance(target_date, str):
+        clean = target_date.strip()[:10]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", clean):
+            raise ValueError(f"Invalid target_date '{target_date}'. Expected 'YYYY-MM-DD'.")
+        date_str = clean
+    else:
+        raise ValueError(f"target_date must be str or date-like object, got {type(target_date)}")
+
+    eng = engine or get_engine()
+    is_sqlite = (eng.dialect.name == "sqlite")
+
+    # Determine candidate tables
+    target_tables = TABLES_WITH_DATE_COLUMNS.copy()
+    if not include_transactions:
+        if "TRANSACTIONS" in target_tables:
+            del target_tables["TRANSACTIONS"]
+        if "BENCHMARK_TRANSACTIONS" in target_tables:
+            del target_tables["BENCHMARK_TRANSACTIONS"]
+
+    if tables is not None:
+        target_names = {t.strip().upper() for t in tables}
+        target_tables = {t: col for t, col in target_tables.items() if t.upper() in target_names}
+
+    results: Dict[str, int] = {}
+
+    with eng.connect() as conn:
+        if is_sqlite:
+            existing = [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()]
+        else:
+            existing = [r[0] for r in conn.execute(text("SHOW TABLES")).fetchall()]
+
+    existing_set = set(existing)
+
+    if dry_run:
+        with eng.connect() as conn:
+            for tbl, date_col in target_tables.items():
+                if tbl in existing_set:
+                    try:
+                        cnt = conn.execute(
+                            text(f"SELECT COUNT(*) FROM `{tbl}` WHERE `{date_col}` = :target_date"),
+                            {"target_date": date_str}
+                        ).scalar()
+                        results[tbl] = int(cnt or 0)
+                    except Exception:
+                        results[tbl] = 0
+                else:
+                    results[tbl] = 0
+        return results
+
+    with eng.begin() as conn:
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+
+        for tbl, date_col in target_tables.items():
+            if tbl in existing_set:
+                try:
+                    del_res = conn.execute(
+                        text(f"DELETE FROM `{tbl}` WHERE `{date_col}` = :target_date"),
+                        {"target_date": date_str}
+                    )
+                    results[tbl] = int(del_res.rowcount if del_res.rowcount is not None and del_res.rowcount >= 0 else 0)
+                except Exception:
+                    results[tbl] = 0
+            else:
+                results[tbl] = 0
+
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+
+    return results
+
+
+def get_target_download_date(asof: Optional[Union[str, date, Any]] = None) -> str:
+    """
+    Returns the target date as 'YYYY-MM-DD' for downloading market data.
+    If asof (default: today) is a weekday, returns asof.
+    If asof is a weekend (Saturday or Sunday), returns the last weekday (Friday).
+    """
+    if asof is None:
+        d = date.today()
+    elif isinstance(asof, str):
+        d = pd.to_datetime(asof).date()
+    elif hasattr(asof, "date") and callable(getattr(asof, "date")):
+        d = asof.date()
+    elif isinstance(asof, date):
+        d = asof
+    else:
+        d = date.today()
+
+    # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6
+    if d.weekday() == 5:  # Saturday
+        return (d - timedelta(days=1)).strftime("%Y-%m-%d")
+    elif d.weekday() == 6:  # Sunday
+        return (d - timedelta(days=2)).strftime("%Y-%m-%d")
+    else:
+        return d.strftime("%Y-%m-%d")
+
+
+def seed_initial_processed_dates(
+    engine: Optional[Engine] = None,
+    start_date: str = "2024-01-01",
+    end_date: str = "2026-09-24"
+) -> int:
+    """
+    Seeds initial processed dates across all weekdays between start_date and end_date (inclusive).
+    Uses INSERT IGNORE / INSERT OR IGNORE so existing records are preserved.
+    """
+    eng = engine or get_engine()
+    is_sqlite = (eng.dialect.name == "sqlite")
+
+    b_dates = pd.bdate_range(start=start_date, end=end_date).strftime("%Y-%m-%d").tolist()
+    if not b_dates:
+        return 0
+
+    verb = "INSERT OR IGNORE" if is_sqlite else "INSERT IGNORE"
+    sql = f"""
+        {verb} INTO `PROCESSED_DATES` (`DATE`, `STATUS`)
+        VALUES (:d, 'SUCCESS')
+    """
+    with eng.begin() as conn:
+        for d_str in b_dates:
+            conn.execute(text(sql), {"d": d_str})
+
+    return len(b_dates)
+
+
+def record_processed_date(
+    processed_date: Union[str, date, Any],
+    status: str = "SUCCESS",
+    engine: Optional[Engine] = None
+) -> str:
+    """
+    Records or updates a successfully processed date in the PROCESSED_DATES table.
+    """
+    if hasattr(processed_date, "strftime"):
+        date_str = processed_date.strftime("%Y-%m-%d")
+    elif isinstance(processed_date, str):
+        clean = processed_date.strip()[:10]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", clean):
+            raise ValueError(f"Invalid processed_date '{processed_date}'. Expected 'YYYY-MM-DD'.")
+        date_str = clean
+    else:
+        raise ValueError(f"processed_date must be str or date-like object, got {type(processed_date)}")
+
+    eng = engine or get_engine()
+    is_sqlite = (eng.dialect.name == "sqlite")
+
+    if is_sqlite:
+        sql = """
+            INSERT INTO `PROCESSED_DATES` (`DATE`, `STATUS`)
+            VALUES (:d, :s)
+            ON CONFLICT(`DATE`) DO UPDATE SET `STATUS` = excluded.`STATUS`;
+        """
+    else:
+        sql = """
+            INSERT INTO `PROCESSED_DATES` (`DATE`, `STATUS`)
+            VALUES (:d, :s)
+            ON DUPLICATE KEY UPDATE `STATUS` = VALUES(`STATUS`);
+        """
+
+    with eng.begin() as conn:
+        conn.execute(text(sql), {"d": date_str, "s": status})
+
+    return date_str
+
+
+def fetch_processed_dates(engine: Optional[Engine] = None, order: str = "DESC") -> List[str]:
+    """
+    Fetches all successfully processed dates from the PROCESSED_DATES table.
+    Returns list of 'YYYY-MM-DD' strings, sorted descending (default) or ascending.
+    """
+    eng = engine or get_engine()
+    sort_dir = "ASC" if str(order).strip().upper() == "ASC" else "DESC"
+
+    with eng.connect() as conn:
+        try:
+            rows = conn.execute(
+                text(f"SELECT `DATE` FROM `PROCESSED_DATES` WHERE `STATUS` = 'SUCCESS' ORDER BY `DATE` {sort_dir}")
+            ).scalars().all()
+            return [pd.to_datetime(d).strftime("%Y-%m-%d") for d in rows]
+        except Exception:
+            return []
+
+
+def get_latest_processed_date(engine: Optional[Engine] = None) -> Optional[str]:
+    """
+    Returns the latest successfully processed date string ('YYYY-MM-DD') from PROCESSED_DATES,
+    or None if no dates have been recorded.
+    """
+    dates = fetch_processed_dates(engine=engine, order="DESC")
+    return dates[0] if dates else None
+
+
+def is_date_processed(target_date: Union[str, date, Any], engine: Optional[Engine] = None) -> bool:
+    """
+    Checks whether target_date exists and has completed successfully in PROCESSED_DATES.
+    """
+    if hasattr(target_date, "strftime"):
+        date_str = target_date.strftime("%Y-%m-%d")
+    elif isinstance(target_date, str):
+        date_str = target_date.strip()[:10]
+    else:
+        date_str = str(target_date)[:10]
+
+    eng = engine or get_engine()
+    try:
+        with eng.connect() as conn:
+            cnt = conn.execute(
+                text("SELECT COUNT(*) FROM `PROCESSED_DATES` WHERE `DATE` = :d AND `STATUS` = 'SUCCESS'"),
+                {"d": date_str}
+            ).scalar()
+        return bool(cnt and int(cnt) > 0)
+    except Exception:
+        return False
+
+
+def get_current_day_delete_date(engine: Optional[Engine] = None, asof: Optional[Union[str, date, Any]] = None) -> str:
+    """
+    Returns the target date as 'YYYY-MM-DD' for deleting the current day's data.
+    If asof is specified, evaluates as-of date (falling back from weekend to Friday if no data).
+    Otherwise, defaults to the latest successfully processed date from PROCESSED_DATES,
+    falling back to today (if weekday) or the last weekday (Friday).
+    """
+    if asof is None:
+        latest_proc = get_latest_processed_date(engine=engine)
+        if latest_proc:
+            return latest_proc
+        d = date.today()
+    else:
+        if isinstance(asof, date) and not isinstance(asof, datetime):
+            d = asof
+        else:
+            d = pd.to_datetime(asof).date()
+
+    if d.weekday() < 5:
+        return d.strftime("%Y-%m-%d")
+
+    d_str = d.strftime("%Y-%m-%d")
+    if engine is not None:
+        try:
+            with engine.connect() as conn:
+                count = conn.execute(
+                    text("SELECT COUNT(*) FROM `ASSET_PRICES` WHERE `DATE` = :d"),
+                    {"d": d_str}
+                ).scalar()
+                if count and int(count) > 0:
+                    return d_str
+        except Exception:
+            pass
+
+    days_to_sub = 1 if d.weekday() == 5 else 2
+    return (d - timedelta(days=days_to_sub)).strftime("%Y-%m-%d")
+
+
+def trigger_data_download(
+    target_date: Optional[Union[str, date, Any]] = None,
+    engine: Optional[Engine] = None,
+    history_days: int = 520,
+) -> Dict[str, Any]:
+    """
+    Triggers end-to-end data download and synchronization for target_date
+    (defaults to today if weekday, or the last weekday if today is a weekend):
+    1. Ensures all database tables exist.
+    2. Discovers all historical tickers (TRANSACTIONS) and benchmark constituent tickers.
+    3. Fetches prices and dividends from Yahoo Finance via fetch_and_store_ticker.
+    4. Backfills missing prices.
+    5. Fetches FX rates for non-GBP currencies.
+    6. Backfills missing FX rates.
+    7. Collects dividend cashflows and updates CASHACCOUNT.
+    8. Calculates and stores daily portfolio values.
+    9. Checks benchmark transactions coverage and computes daily benchmark values / risk metrics.
+
+    Returns:
+        Dict with status, target_date, summary counts, and latest valuation metrics.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    target_dt_str = get_target_download_date(target_date)
+
+    # 1. Verify transactions exist in TRANSACTIONS table
+    with eng.connect() as conn:
+        tx_count = conn.execute(text("SELECT COUNT(*) FROM `TRANSACTIONS`")).scalar()
+    if not tx_count or int(tx_count) == 0:
+        return {
+            "status": "warning",
+            "message": "No transactions found in TRANSACTIONS table. Please record transactions first.",
+            "target_date": target_dt_str,
+            "tickers_count": 0,
+            "records_stored": 0,
+        }
+
+    all_tickers = set(fetch_all_historical_tickers(engine=eng))
+    current_positions = fetch_portfolio_positions(engine=eng)
+    for t in current_positions.keys():
+        all_tickers.add(t)
+
+    try:
+        bm_df = fetch_benchmarks_info(engine=eng)
+        if not bm_df.empty and "CONSTITUENTS_JSON" in bm_df.columns:
+            for _, r in bm_df.iterrows():
+                try:
+                    c_dict = json.loads(r["CONSTITUENTS_JSON"])
+                    all_tickers.update(c_dict.keys())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 2. Ingest stock price data for each ticker
+    price_results = []
+    for ticker in sorted(all_tickers):
+        sh = current_positions.get(ticker, 0.0)
+        try:
+            res = fetch_and_store_ticker(ticker, shares=sh, history_days=history_days, engine=eng)
+            if res:
+                price_results.append(res)
+        except Exception:
+            pass
+
+    # 3. Backfill missing prices
+    bf_prices = backfill_missing_prices(engine=eng)
+
+    # 4. Ingest FX rates for non-GBP currencies
+    foreign_currencies = get_foreign_currencies_from_prices(engine=eng)
+    fx_results = []
+    for curr in foreign_currencies:
+        try:
+            res = fetch_and_store_fx_rate(curr, "GBP", engine=eng)
+            if res:
+                fx_results.append(res)
+        except Exception:
+            pass
+
+    # 5. Backfill missing FX rates
+    bf_fx = backfill_missing_fx_rates(engine=eng)
+
+    # 6. Collect dividend cashflows and update CASHACCOUNT
+    cash_res = collect_and_store_dividend_cashflows_and_cash_account(engine=eng)
+
+    # 7. Calculate and store daily portfolio values
+    val_res = calculate_and_store_daily_portfolio_values(engine=eng)
+
+    # 8. Check benchmark transactions coverage and compute daily benchmark values / risk
+    bm_records = 0
+    bm_synced = False
+    try:
+        coverage = check_benchmark_transactions_coverage(engine=eng)
+        if not coverage.get("is_synced", True):
+            bm_sync_res = sync_benchmark_transactions_and_risk(engine=eng, asof_date=target_dt_str)
+            bm_synced = True
+            bm_records = bm_sync_res.get("benchmark_values_stored", 0)
+        else:
+            bm_calc = calculate_and_store_daily_benchmark_values(engine=eng, asof_date=target_dt_str)
+            bm_records = bm_calc.get("records_stored", 0)
+            try:
+                regenerate_risk_numbers_from_date(start_date=target_dt_str, engine=eng)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 9. Record successfully completed date in PROCESSED_DATES
+    try:
+        record_processed_date(target_dt_str, status="SUCCESS", engine=eng)
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "target_date": target_dt_str,
+        "tickers_count": len(all_tickers),
+        "tickers_processed": len(price_results),
+        "price_records_backfilled": bf_prices.get("rows_backfilled", 0) if isinstance(bf_prices, dict) else 0,
+        "fx_records_backfilled": bf_fx.get("rows_backfilled", 0) if isinstance(bf_fx, dict) else 0,
+        "cash_balance_gbp": cash_res.get("total_gbp", 0.0) if isinstance(cash_res, dict) else 0.0,
+        "portfolio_values_stored": val_res.get("records_stored", 0) if isinstance(val_res, dict) else 0,
+        "latest_total_value": val_res.get("latest_total_value", 0.0) if isinstance(val_res, dict) else 0.0,
+        "latest_date": val_res.get("latest_date", target_dt_str) if isinstance(val_res, dict) else target_dt_str,
+        "benchmark_values_stored": bm_records,
+        "benchmark_synced": bm_synced,
+        "message": f"Successfully downloaded and synchronized data up to {target_dt_str}."
+    }
 
 
 if __name__ == "__main__":
@@ -2860,13 +3299,15 @@ def add_benchmark(
     description: Optional[str] = None,
     benchmark_code: Optional[str] = None,
     ticker: Optional[str] = None,
-    engine: Optional[Engine] = None
+    engine: Optional[Engine] = None,
+    asof_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Adds or updates a benchmark defined as a linear combination of tickers.
     - constituents: Dict[str, float] (e.g. {'CSP1.L': 0.60, 'VUKE.L': 0.40}) or string 'CSP1.L:60, VUKE.L:40'.
     - name: Optional display name. Falls back to 'TICKER1_PERCENT1_TICKER2_PERCENT2_...'.
     - benchmark_code: Unique benchmark code (defaults to fallback name).
+    - asof_date: Optional cutoff date; ensures no market data beyond this date is created.
     """
     eng = engine or get_engine()
     create_all_tables(eng)
@@ -2907,12 +3348,20 @@ def add_benchmark(
         conn.commit()
 
     # Pre-fetch prices and FX for each constituent ticker
+    latest_proc = asof_date or get_latest_processed_date(engine=eng)
     for c_ticker in c_map.keys():
         try:
             fetch_and_store_ticker(c_ticker, engine=eng)
             foreign_currs = get_foreign_currencies_from_prices(engine=eng)
             for c in foreign_currs:
                 fetch_and_store_fx_rate(from_curr=c, engine=eng)
+        except Exception:
+            pass
+
+    # Ensure no prices/fx beyond the latest successful processed date are retained
+    if latest_proc:
+        try:
+            delete_data_after_date(latest_proc, engine=eng)
         except Exception:
             pass
 
@@ -2939,20 +3388,30 @@ def delete_benchmark(benchmark_code: str, engine: Optional[Engine] = None) -> bo
     return True
 
 
-def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -> pd.DataFrame:
+def generate_and_store_benchmark_transactions(
+    engine: Optional[Engine] = None,
+    asof_date: Optional[str] = None
+) -> pd.DataFrame:
     """
     For every portfolio transaction in TRANSACTIONS, computes the transaction value in GBP on that date,
     and generates corresponding shadow transactions across constituent tickers in BENCHMARK_TRANSACTIONS
     for each active benchmark in the BENCHMARKS table according to its linear combination weights.
+    Only transactions and prices up to asof_date (defaulting to latest processed date) are processed.
     """
     eng = engine or get_engine()
     create_all_tables(eng)
 
+    if asof_date is None:
+        asof_date = get_latest_processed_date(engine=eng)
+
     with eng.connect() as conn:
-        tx_df = pd.read_sql(
-            text("SELECT `ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY` FROM `TRANSACTIONS` ORDER BY `TRANSACTION_DATE` ASC, `ID` ASC"),
-            conn
-        )
+        tx_query = "SELECT `ID`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY` FROM `TRANSACTIONS` "
+        params = {}
+        if asof_date:
+            tx_query += "WHERE `TRANSACTION_DATE` <= :asof "
+            params["asof"] = str(asof_date)[:10]
+        tx_query += "ORDER BY `TRANSACTION_DATE` ASC, `ID` ASC"
+        tx_df = pd.read_sql(text(tx_query), conn, params=params)
         bm_df = pd.read_sql(
             text("SELECT `BENCHMARK_CODE`, `NAME`, `CONSTITUENTS_JSON` FROM `BENCHMARKS` ORDER BY `BENCHMARK_CODE` ASC"),
             conn
@@ -2963,7 +3422,7 @@ def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -
 
     tx_df["TRANSACTION_DATE"] = pd.to_datetime(tx_df["TRANSACTION_DATE"]).dt.strftime("%Y-%m-%d")
 
-    prices_gbp = fetch_historical_prices_gbp(engine=eng)
+    prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=eng)
     if prices_gbp.empty:
         return pd.DataFrame(columns=["ORIGINAL_TX_ID", "BENCHMARK_CODE", "TICKER", "TRANSACTION_DATE", "QUANTITY", "PRICE_GBP", "GBP_VALUE", "WEIGHT"])
 
@@ -3006,8 +3465,11 @@ def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -
                 if c_ticker not in price_matrix.columns:
                     try:
                         fetch_and_store_ticker(c_ticker, engine=eng)
-                        prices_gbp = fetch_historical_prices_gbp(engine=eng)
+                        if asof_date:
+                            delete_data_after_date(asof_date, engine=eng)
+                        prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=eng)
                         price_matrix = prices_gbp.ffill().bfill()
+                        price_dates = sorted(price_matrix.index.tolist())
                     except Exception:
                         pass
 
@@ -3039,6 +3501,8 @@ def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -
         return pd.DataFrame(columns=["ORIGINAL_TX_ID", "BENCHMARK_CODE", "TICKER", "TRANSACTION_DATE", "QUANTITY", "PRICE_GBP", "GBP_VALUE", "WEIGHT"])
 
     bm_tx_df = pd.DataFrame(bm_tx_records)
+    if asof_date:
+        bm_tx_df = bm_tx_df[bm_tx_df["TRANSACTION_DATE"] <= str(asof_date)[:10]]
 
     with eng.connect() as conn:
         conn.execute(text("DELETE FROM `BENCHMARK_TRANSACTIONS`"))
@@ -3050,10 +3514,11 @@ def generate_and_store_benchmark_transactions(engine: Optional[Engine] = None) -
 
 def calculate_and_store_daily_benchmark_values(
     engine: Optional[Engine] = None,
-    sync_transactions: bool = True
+    sync_transactions: bool = True,
+    asof_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Calculates daily benchmark valuations for every date in history by:
+    Calculates daily benchmark valuations for every date in history up to asof_date (default: latest processed date):
     1. Replaying cumulative shadow share positions per constituent from BENCHMARK_TRANSACTIONS.
     2. Multiplying cumulative shares by daily closing constituent price in GBP from ASSET_PRICES/FX_RATES (STOCKS).
     3. Collecting cash from constituent dividend events into the benchmark cash account (CASH).
@@ -3063,26 +3528,38 @@ def calculate_and_store_daily_benchmark_values(
     eng = engine or get_engine()
     create_all_tables(eng)
 
+    if asof_date is None:
+        asof_date = get_latest_processed_date(engine=eng)
+
     if sync_transactions:
-        # Ensure shadow benchmark transactions are generated first
-        generate_and_store_benchmark_transactions(engine=eng)
+        # Ensure shadow benchmark transactions are generated first up to asof_date
+        generate_and_store_benchmark_transactions(engine=eng, asof_date=asof_date)
 
     with eng.connect() as conn:
+        tx_where = "WHERE `TRANSACTION_DATE` <= :asof" if asof_date else ""
+        tx_params = {"asof": str(asof_date)[:10]} if asof_date else {}
         bm_tx_df = pd.read_sql(
-            text("SELECT `BENCHMARK_CODE`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY`, `WEIGHT` FROM `BENCHMARK_TRANSACTIONS` ORDER BY `TRANSACTION_DATE` ASC"),
-            conn
+            text(f"SELECT `BENCHMARK_CODE`, `TICKER`, `TRANSACTION_DATE`, `QUANTITY`, `WEIGHT` FROM `BENCHMARK_TRANSACTIONS` {tx_where} ORDER BY `TRANSACTION_DATE` ASC"),
+            conn,
+            params=tx_params
         )
         bm_df = pd.read_sql(
             text("SELECT `BENCHMARK_CODE`, `CONSTITUENTS_JSON` FROM `BENCHMARKS`"),
             conn
         )
+        div_where = "AND `DATE` <= :asof" if asof_date else ""
+        div_params = {"asof": str(asof_date)[:10]} if asof_date else {}
         div_prices = pd.read_sql(
-            text("SELECT `DATE`, `TICKER`, `DIVIDENDS`, `CURRENCY` FROM `ASSET_PRICES` WHERE `DIVIDENDS` > 0 ORDER BY `DATE` ASC"),
-            conn
+            text(f"SELECT `DATE`, `TICKER`, `DIVIDENDS`, `CURRENCY` FROM `ASSET_PRICES` WHERE `DIVIDENDS` > 0 {div_where} ORDER BY `DATE` ASC"),
+            conn,
+            params=div_params
         )
+        fx_where = "AND `DATE` <= :asof" if asof_date else ""
+        fx_params = {"asof": str(asof_date)[:10]} if asof_date else {}
         fx_df = pd.read_sql(
-            text("SELECT `DATE`, `FROM_CURRENCY`, `RATE` FROM `FX_RATES` WHERE `TO_CURRENCY` = 'GBP'"),
-            conn
+            text(f"SELECT `DATE`, `FROM_CURRENCY`, `RATE` FROM `FX_RATES` WHERE `TO_CURRENCY` = 'GBP' {fx_where}"),
+            conn,
+            params=fx_params
         )
 
     if bm_tx_df.empty or bm_df.empty:
@@ -3107,7 +3584,7 @@ def calculate_and_store_daily_benchmark_values(
         for _, r in div_merged.iterrows():
             div_gbp_map[(str(r["DATE"]), str(r["TICKER"]).upper())] = float(r["DIV_GBP"])
 
-    prices_gbp = fetch_historical_prices_gbp(engine=eng)
+    prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=eng)
     if prices_gbp.empty:
         return {"records_stored": 0, "summary_df": pd.DataFrame()}
 
@@ -3115,6 +3592,9 @@ def calculate_and_store_daily_benchmark_values(
     price_dates = [str(d)[:10] for d in price_matrix.index]
     tx_dates = bm_tx_df["TRANSACTION_DATE"].tolist()
     full_date_range = sorted(list(set(price_dates + tx_dates)))
+    if asof_date:
+        asof_str = str(asof_date)[:10]
+        full_date_range = [d for d in full_date_range if d <= asof_str]
 
     all_val_records = []
 
@@ -3198,6 +3678,11 @@ def calculate_and_store_daily_benchmark_values(
 
     with eng.connect() as conn:
         conn.execute(text(upsert_sql), all_val_records)
+        if asof_date:
+            conn.execute(
+                text("DELETE FROM `BENCHMARK_VALUES` WHERE `DATE` > :asof"),
+                {"asof": str(asof_date)[:10]}
+            )
         conn.commit()
 
     return {"records_stored": len(all_val_records), "summary_df": val_df}
@@ -3483,6 +3968,7 @@ def regenerate_risk_numbers_from_date(
 def sync_benchmark_transactions_and_risk(
     engine: Optional[Engine] = None,
     force: bool = False,
+    asof_date: Optional[str] = None,
     min_lookback: int = 260,
     lookback_days: int = 260,
     num_permutations: int = 100,
@@ -3495,7 +3981,7 @@ def sync_benchmark_transactions_and_risk(
     Checks if for every transaction in TRANSACTIONS, the corresponding benchmark transactions were made.
     If not (or if force=True):
       1. Generates shadow benchmark transactions across all active benchmarks in BENCHMARK_TRANSACTIONS.
-      2. Regenerates daily benchmark valuations in BENCHMARK_VALUES.
+      2. Regenerates daily benchmark valuations in BENCHMARK_VALUES up to asof_date.
       3. Regenerates daily portfolio values in PORTFOLIO_VALUES.
       4. Regenerates portfolio risk numbers (PORTFOLIO_VAR, PORTFOLIO_RISK_CONTRIBUTIONS, PORTFOLIO_SCENARIO_PNL)
          for all subsequent days starting from the earliest missing transaction date.
@@ -3513,6 +3999,9 @@ def sync_benchmark_transactions_and_risk(
             "message": "All transactions have corresponding benchmark transactions."
         }
 
+    if asof_date is None:
+        asof_date = get_latest_processed_date(engine=eng)
+
     earliest_date = coverage.get("earliest_missing_date")
     if not earliest_date:
         with eng.connect() as conn:
@@ -3520,10 +4009,10 @@ def sync_benchmark_transactions_and_risk(
             earliest_date = str(min_dt)[:10] if min_dt else "1970-01-01"
 
     # 1. Regenerate shadow benchmark transactions
-    bm_tx_df = generate_and_store_benchmark_transactions(engine=eng)
+    bm_tx_df = generate_and_store_benchmark_transactions(engine=eng, asof_date=asof_date)
 
     # 2. Regenerate daily benchmark valuations
-    bm_val_res = calculate_and_store_daily_benchmark_values(engine=eng, sync_transactions=False)
+    bm_val_res = calculate_and_store_daily_benchmark_values(engine=eng, sync_transactions=False, asof_date=asof_date)
 
     # 3. Backfill portfolio daily values for all dates
     pv_res = calculate_and_store_daily_portfolio_values(backfill_days=-1, engine=eng)

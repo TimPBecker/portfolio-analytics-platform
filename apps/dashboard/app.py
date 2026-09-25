@@ -21,7 +21,13 @@ from portfolio_core.db import (
     fetch_benchmarks_info,
     fetch_benchmark_values_history,
     fetch_all_transactions,
-    fetch_raw_asset_prices
+    fetch_raw_asset_prices,
+    delete_data_for_date,
+    get_target_download_date,
+    get_current_day_delete_date,
+    trigger_data_download,
+    get_latest_processed_date,
+    fetch_processed_dates
 )
 try:
     from src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
@@ -69,10 +75,11 @@ except Exception:
 # 2. Cached Parallel Data Loader (Option 1: ThreadPool Pre-calculation)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
-def load_cached_data_parallel(db_name: str, _engine: Optional[Any] = None) -> Dict[str, Any]:
+def load_cached_data_parallel(db_name: str, asof_date: Optional[str] = None, _engine: Optional[Any] = None) -> Dict[str, Any]:
     """
     Loads and caches core market prices, positions, and pre-fetches all tab data
     concurrently across background worker threads for maximum responsiveness.
+    Anchors precomputed datasets to asof_date (the latest successfully processed date).
     """
     engine = _engine
     if engine is None:
@@ -82,15 +89,19 @@ def load_cached_data_parallel(db_name: str, _engine: Optional[Any] = None) -> Di
             from portfolio_core.db import get_test_engine
             engine = get_test_engine(fallback_to_sqlite=True)
 
+    if asof_date is None:
+        asof_date = get_latest_processed_date(engine=engine)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         f_tickers = executor.submit(fetch_available_tickers, engine=engine)
-        f_prices = executor.submit(fetch_historical_prices_gbp, engine=engine)
-        f_positions = executor.submit(fetch_portfolio_positions, engine=engine)
+        f_prices = executor.submit(fetch_historical_prices_gbp, asof_date=asof_date, engine=engine)
+        f_positions = executor.submit(fetch_portfolio_positions, asof_date=asof_date, engine=engine)
         f_var_dates = executor.submit(fetch_available_var_dates, engine=engine)
-        f_pv = executor.submit(fetch_portfolio_values_history, days=None, engine=engine)
+        f_pv = executor.submit(fetch_portfolio_values_history, days=None, asof_date=asof_date, engine=engine)
         f_bm_info = executor.submit(fetch_benchmarks_info, engine=engine)
-        f_bm_history = executor.submit(fetch_benchmark_values_history, engine=engine)
+        f_bm_history = executor.submit(fetch_benchmark_values_history, asof_date=asof_date, engine=engine)
         f_tx = executor.submit(fetch_all_transactions, limit=100, engine=engine)
+        f_proc_dates = executor.submit(fetch_processed_dates, engine=engine)
 
         tickers = f_tickers.result()
         prices_gbp = f_prices.result()
@@ -100,13 +111,17 @@ def load_cached_data_parallel(db_name: str, _engine: Optional[Any] = None) -> Di
         bm_info_df = f_bm_info.result()
         bm_history_df = f_bm_history.result()
         transactions_df = f_tx.result()
+        processed_dates = f_proc_dates.result()
+
+    if asof_date and var_dates:
+        var_dates = [d for d in var_dates if d <= asof_date]
 
     # Pre-fetch raw prices for the default selected ticker in Tab 4
     raw_cache: Dict[str, pd.DataFrame] = {}
     default_ticker = "NVDA" if "NVDA" in tickers else (tickers[0] if tickers else None)
     if default_ticker:
         try:
-            raw_cache[default_ticker] = fetch_raw_asset_prices(default_ticker, engine=engine)
+            raw_cache[default_ticker] = fetch_raw_asset_prices(default_ticker, asof_date=asof_date, engine=engine)
         except Exception:
             pass
 
@@ -119,7 +134,9 @@ def load_cached_data_parallel(db_name: str, _engine: Optional[Any] = None) -> Di
         "bm_info_df": bm_info_df,
         "bm_history_df": bm_history_df,
         "transactions_df": transactions_df,
-        "raw_prices_cache": raw_cache
+        "raw_prices_cache": raw_cache,
+        "processed_dates": processed_dates,
+        "latest_processed_date": asof_date
     }
 
 
@@ -204,6 +221,59 @@ def run_dashboard():
             st.rerun()
 
         st.divider()
+
+        # Admin Panel: Daily pipeline execution & current day maintenance
+        st.markdown("### 🛠️ Admin Panel")
+        st.caption("Daily market data pipeline & maintenance controls")
+
+        target_dl_date = get_target_download_date()
+        target_del_date = get_current_day_delete_date(engine=active_engine)
+
+        # Button: Delete the current day
+        if st.button(
+            f"🗑️ Delete Current Day ({target_del_date})",
+            key="btn_delete_current_day",
+            type="secondary",
+            use_container_width=True,
+            help=f"Prune market prices, valuations, and risk metrics for {target_del_date} from database '{selected_db}'."
+        ):
+            with st.spinner(f"Deleting records for {target_del_date} from '{selected_db}'..."):
+                try:
+                    del_res = delete_data_for_date(target_del_date, engine=active_engine)
+                    total_del = sum(del_res.values())
+                    if total_del > 0:
+                        breakdown = ", ".join(f"{tbl}: {cnt}" for tbl, cnt in del_res.items() if cnt > 0)
+                        st.success(f"✅ Deleted {total_del:,} records for {target_del_date} ({breakdown}).")
+                    else:
+                        st.info(f"ℹ️ No records found for {target_del_date} in '{selected_db}'.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"❌ Failed to delete current day data: {ex}")
+
+        # Button: Trigger data download for today or last weekday
+        if st.button(
+            f"📥 Trigger Data Download ({target_dl_date})",
+            key="btn_trigger_data_download",
+            type="primary",
+            use_container_width=True,
+            help=f"Download daily market prices and sync portfolio/benchmark analytics for {target_dl_date} (today or last weekday if weekend)."
+        ):
+            with st.spinner(f"Ingesting market data & computing valuations for {target_dl_date}..."):
+                try:
+                    res = trigger_data_download(target_date=target_dl_date, engine=active_engine)
+                    if res.get("status") == "success":
+                        st.success(f"✅ Data download and sync complete for {target_dl_date}!")
+                    elif res.get("status") == "warning":
+                        st.warning(f"⚠️ {res.get('message')}")
+                    else:
+                        st.info(f"ℹ️ {res.get('message', 'Completed.')}")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"❌ Failed to download data: {ex}")
+
+        st.divider()
         st.markdown("### 📚 Quick Guide")
         st.markdown(
             """
@@ -221,9 +291,12 @@ def run_dashboard():
     st.title("📈 Portfolio Risk Analytics")
     st.markdown("Interactive quantitative risk suite for rolling volatilities, tail risk percentiles, and return distribution modeling.")
 
+    # Determine latest successfully processed date
+    latest_processed = get_latest_processed_date(engine=active_engine)
+
     # Load core data and precalculate tab datasets for selected database concurrently
     with st.spinner(f"Connecting to database '{selected_db}' and pre-calculating tab analytics in parallel..."):
-        data_bundle = load_cached_data_parallel(selected_db, _engine=active_engine)
+        data_bundle = load_cached_data_parallel(selected_db, asof_date=latest_processed, _engine=active_engine)
 
     prices_gbp = data_bundle["prices_gbp"]
     available_tickers = data_bundle["tickers"]
@@ -234,16 +307,34 @@ def run_dashboard():
     bm_history_df = data_bundle["bm_history_df"]
     transactions_df = data_bundle["transactions_df"]
     raw_prices_cache = data_bundle["raw_prices_cache"]
+    processed_dates = data_bundle.get("processed_dates") or []
 
     if prices_gbp.empty:
         st.error(f"No historical market price data found in database '{selected_db}'. Please ensure the database is accessible and populated.")
         st.stop()
 
-    # Header status strip
-    latest_date_str = str(prices_gbp.index[-1])[:10]
+    # Header status strip: Date selectbox in col_h1 (same 1/3 size), active tickers in col_h2, tracked holdings in col_h3
+    date_options = processed_dates if processed_dates else []
+    if not date_options:
+        if latest_processed:
+            date_options = [latest_processed]
+        elif not prices_gbp.empty:
+            date_options = sorted(list(set(pd.to_datetime(prices_gbp.index).strftime("%Y-%m-%d"))), reverse=True)
+        else:
+            date_options = [str(date.today())]
+
+    default_date = latest_processed or (date_options[0] if date_options else str(prices_gbp.index[-1])[:10])
+    default_idx = date_options.index(default_date) if default_date in date_options else 0
+
     col_h1, col_h2, col_h3 = st.columns(3)
     with col_h1:
-        st.metric("Latest Market Date", latest_date_str)
+        selected_date = st.selectbox(
+            "Date",
+            options=date_options,
+            index=default_idx,
+            key="header_selected_date",
+            help="Select any successfully processed date. Defaults to the latest processed date."
+        )
     with col_h2:
         st.metric("Active Tickers in DB", f"{len(available_tickers)} assets")
     with col_h3:
@@ -266,16 +357,17 @@ def run_dashboard():
         render_tab_portfolio(
             prices_gbp=prices_gbp,
             positions=positions,
-            asof_date=latest_date_str,
+            asof_date=selected_date,
             engine=active_engine,
             db_name=selected_db,
-            pv_df=pv_df
+            pv_df=pv_df,
+            processed_dates=processed_dates
         )
 
     with tab2:
         render_tab_benchmarks(
             prices_gbp=prices_gbp,
-            asof_date=latest_date_str,
+            asof_date=selected_date,
             engine=active_engine,
             bm_info_df=bm_info_df,
             bm_history_df=bm_history_df,
@@ -286,7 +378,7 @@ def run_dashboard():
         render_tab_var(
             prices_gbp=prices_gbp,
             positions=positions,
-            asof_date=latest_date_str,
+            asof_date=selected_date,
             engine=active_engine
         )
 
@@ -294,7 +386,7 @@ def run_dashboard():
         render_tab_backtesting(
             prices_gbp=prices_gbp,
             positions=positions,
-            asof_date=latest_date_str,
+            asof_date=selected_date,
             engine=active_engine
         )
 

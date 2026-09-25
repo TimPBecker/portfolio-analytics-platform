@@ -38,21 +38,47 @@ def render_tab_portfolio(
     asof_date: Optional[str] = None,
     engine: Optional[Engine] = None,
     db_name: Optional[str] = None,
-    pv_df: Optional[pd.DataFrame] = None
+    pv_df: Optional[pd.DataFrame] = None,
+    processed_dates: Optional[List[str]] = None
 ):
-    """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view with PDF Export."""
+    """Renders the Portfolio Stock Allocations, Top Movers, and Valuation History view with PDF Export and Date Selection."""
+    if processed_dates is None and engine is not None:
+        try:
+            from portfolio_core.db import fetch_processed_dates
+            processed_dates = fetch_processed_dates(engine=engine)
+        except Exception:
+            processed_dates = []
+
+    if not processed_dates:
+        if pv_df is not None and not pv_df.empty and "DATE" in pv_df.columns:
+            processed_dates = sorted(
+                list(set(pd.to_datetime(pv_df["DATE"]).dt.strftime("%Y-%m-%d"))),
+                reverse=True
+            )
+        elif not prices_gbp.empty:
+            processed_dates = sorted(
+                list(set(pd.to_datetime(prices_gbp.index).strftime("%Y-%m-%d"))),
+                reverse=True
+            )
+        else:
+            processed_dates = [str(asof_date)[:10]] if asof_date else []
+
+    # Active asof date (anchored from top-level Date dropdown or fallback)
+    active_asof = str(asof_date)[:10] if asof_date else (processed_dates[0] if processed_dates else None)
+    report_date_str = str(active_asof or 'latest')[:10]
+
     def _create_report_bytes() -> bytes:
-        ok, path, pdf_bytes, err = generate_portfolio_pdf_report(asof_date=asof_date, db_name=db_name)
+        ok, path, pdf_bytes, err = generate_portfolio_pdf_report(asof_date=active_asof, db_name=db_name)
         if ok and pdf_bytes:
             return pdf_bytes
         st.error(f"Failed to generate PDF report: {err}")
         return b""
 
-    report_date_str = str(asof_date or 'latest')[:10]
     col_header, col_pdf_action = st.columns([2.6, 1.4])
     with col_header:
         st.markdown("### 💼 Portfolio Holdings & Historical Valuation")
         st.caption("Overview of stock holdings valuation, top daily movers, weight allocation breakdown, and historical trajectory.")
+
     with col_pdf_action:
         st.markdown("<div style='padding-top: 6px;'>", unsafe_allow_html=True)
         st.download_button(
@@ -70,19 +96,28 @@ def render_tab_portfolio(
         st.warning("Insufficient price data or active positions.")
         return
 
-    # Slice prices up to asof_date if specified
+    # Slice prices up to active_asof if specified
     active_prices = prices_gbp.copy()
-    if asof_date:
-        asof_ts = pd.to_datetime(asof_date)
+    if active_asof:
+        asof_ts = pd.to_datetime(active_asof)
         if isinstance(active_prices.index, pd.DatetimeIndex):
             active_prices = active_prices.loc[active_prices.index <= asof_ts]
         else:
-            asof_str = str(asof_date)[:10]
+            asof_str = str(active_asof)[:10]
             active_prices = active_prices.loc[[str(idx)[:10] <= asof_str for idx in active_prices.index]]
 
     if active_prices.empty:
         st.warning("No price data available for the specified as-of date.")
         return
+
+    # If active_asof is specified and engine is provided, retrieve exact holdings as of active_asof
+    if active_asof and engine is not None:
+        try:
+            pos_asof = fetch_portfolio_positions(asof_date=active_asof, engine=engine)
+            if pos_asof:
+                positions = pos_asof
+        except Exception:
+            pass
 
     latest_prices = active_prices.iloc[-1]
     active_pos = {t: float(sh) for t, sh in positions.items() if t in latest_prices and sh > 0}
@@ -93,7 +128,11 @@ def render_tab_portfolio(
     # 1. Valuation KPIs at the Top: Current Value & Previous Value (Stock Holdings Only)
     # -------------------------------------------------------------------------
     if pv_df is None:
-        pv_df = fetch_portfolio_values_history(days=None, asof_date=asof_date, engine=engine)
+        pv_df = fetch_portfolio_values_history(days=None, asof_date=active_asof, engine=engine)
+    elif active_asof and not pv_df.empty:
+        asof_str = str(active_asof)[:10]
+        if "DATE" in pv_df.columns:
+            pv_df = pv_df.loc[pv_df["DATE"].astype(str).str[:10] <= asof_str].copy()
 
     if not pv_df.empty and len(pv_df) >= 1:
         curr_row = pv_df.iloc[-1]
@@ -357,7 +396,7 @@ def render_tab_portfolio(
     movers_df = compute_top_position_movers(
         prices_gbp=active_prices,
         positions=positions,
-        asof_date=asof_date,
+        asof_date=active_asof,
         top_n=10
     )
 

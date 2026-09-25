@@ -495,9 +495,10 @@ def render_tab_benchmarks(
                             constituents=bm_constituents_input,
                             name=new_bm_name if new_bm_name else None,
                             description=new_bm_desc if new_bm_desc else None,
-                            engine=engine
+                            engine=engine,
+                            asof_date=asof_date
                         )
-                        calculate_and_store_daily_benchmark_values(engine=engine)
+                        calculate_and_store_daily_benchmark_values(engine=engine, asof_date=asof_date)
                         st.success(f"✅ Benchmark **{res_add['benchmark_code']}** ('{res_add['name']}') successfully registered!")
                         st.cache_data.clear()
                         st.rerun()
@@ -506,7 +507,7 @@ def render_tab_benchmarks(
 
             if recalc_bm_btn:
                 with st.spinner("Regenerating benchmark shadow transactions & daily valuations..."):
-                    res_bm = calculate_and_store_daily_benchmark_values(engine=engine)
+                    res_bm = calculate_and_store_daily_benchmark_values(engine=engine, asof_date=asof_date)
                     st.success(f"✅ Generated {res_bm.get('records_stored', 0)} benchmark valuation points!")
                     st.cache_data.clear()
                     st.rerun()
