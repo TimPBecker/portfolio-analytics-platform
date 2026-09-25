@@ -38,6 +38,7 @@ try:
     from src.ui.tab_benchmarks import render_tab_benchmarks
     from src.ui.tab_transactions import render_tab_transactions
     from src.ui.tab_backtesting import render_tab_backtesting
+    from src.ui.tab_market_data import render_tab_market_data
 except ImportError:
     from apps.dashboard.src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
     from apps.dashboard.src.ui.tab_volatility import render_tab_volatility
@@ -47,6 +48,7 @@ except ImportError:
     from apps.dashboard.src.ui.tab_benchmarks import render_tab_benchmarks
     from apps.dashboard.src.ui.tab_transactions import render_tab_transactions
     from apps.dashboard.src.ui.tab_backtesting import render_tab_backtesting
+    from apps.dashboard.src.ui.tab_market_data import render_tab_market_data
 
 
 
@@ -343,14 +345,15 @@ def run_dashboard():
     st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
     # Main Navigation Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "💼 Portfolio Holdings & Valuation",
         "🎯 Benchmarking",
         "🛡️ Value-at-Risk Spectrum",
         "🔬 VaR Backtesting",
         "📊 Levels, Returns & Histogram",
         "📈 Rolling Volatility",
-        "📝 Transaction Entry"
+        "📝 Transaction Entry",
+        "📡 Market Data Admin"
     ])
 
     with tab1:
@@ -410,6 +413,13 @@ def run_dashboard():
             engine=active_engine,
             transactions_df=transactions_df,
             positions_dict=positions
+        )
+
+    with tab8:
+        render_tab_market_data(
+            engine=active_engine,
+            db_name=selected_db,
+            asof_date=selected_date
         )
 
 

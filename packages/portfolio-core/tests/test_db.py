@@ -499,3 +499,180 @@ def test_processed_dates_operations(sqlite_test_engine):
     with pytest.raises(ValueError):
         record_processed_date("invalid-date", engine=sqlite_engine)
 
+
+def test_fetch_asset_market_data_overview_with_coverage_and_missing_assets(sqlite_test_engine):
+    """
+    Verify fetch_asset_market_data_overview correctly summarizes:
+      - Assets with market data
+      - Assets with trades but missing market data
+      - Benchmark constituents with missing market data
+    """
+    from portfolio_core.db import (
+        create_all_tables,
+        fetch_asset_market_data_overview
+    )
+    from sqlalchemy import text
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    with eng.begin() as conn:
+        # 1. Insert asset prices for NVDA
+        conn.execute(text("""
+            INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME)
+            VALUES 
+              ('2024-01-02', 'NVDA', 'USD', 100, 105, 99, 102, 1000),
+              ('2026-09-24', 'NVDA', 'USD', 120, 125, 119, 122, 1000)
+        """))
+        # 2. Insert transaction for NVDA (has prices) and MISSING_CORP (no prices)
+        conn.execute(text("""
+            INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY)
+            VALUES 
+              (1, 'NVDA', '2024-01-05', 10.0),
+              (2, 'MISSING_CORP', '2025-03-01', 50.0)
+        """))
+        # 3. Insert benchmark with constituent MISSING_ETF
+        conn.execute(text("""
+            INSERT INTO BENCHMARKS (BENCHMARK_CODE, NAME, DESCRIPTION, CONSTITUENTS_JSON)
+            VALUES ('TEST_BM', 'Test BM', 'Description', '{"NVDA": 0.5, "MISSING_ETF": 0.5}')
+        """))
+
+    df = fetch_asset_market_data_overview(engine=eng)
+    assert not df.empty
+    tickers = df["TICKER"].tolist()
+    assert "NVDA" in tickers
+    assert "MISSING_CORP" in tickers
+    assert "MISSING_ETF" in tickers
+
+    # Check NVDA
+    nvda_row = df[df["TICKER"] == "NVDA"].iloc[0]
+    assert nvda_row["STATUS"] == "Available"
+    assert nvda_row["FIRST_DATE"] == "2024-01-02"
+    assert nvda_row["LAST_DATE"] == "2026-09-24"
+    assert nvda_row["RECORDS"] == 2
+    assert "Portfolio Trade" in nvda_row["SOURCE"]
+    assert "Benchmark Constituent" in nvda_row["SOURCE"]
+
+    # Check MISSING_CORP
+    corp_row = df[df["TICKER"] == "MISSING_CORP"].iloc[0]
+    assert corp_row["STATUS"] == "Missing Market Data"
+    assert pd.isna(corp_row["FIRST_DATE"])
+    assert pd.isna(corp_row["LAST_DATE"])
+    assert corp_row["RECORDS"] == 0
+    assert "Portfolio Trade" in corp_row["SOURCE"]
+
+    # Check MISSING_ETF
+    etf_row = df[df["TICKER"] == "MISSING_ETF"].iloc[0]
+    assert etf_row["STATUS"] == "Missing Market Data"
+    assert pd.isna(etf_row["FIRST_DATE"])
+    assert pd.isna(etf_row["LAST_DATE"])
+    assert etf_row["RECORDS"] == 0
+    assert "Benchmark Constituent" in etf_row["SOURCE"]
+
+
+def test_ingest_custom_asset_time_series(sqlite_test_engine, monkeypatch):
+    """Verify custom asset time series ingestion bounded to specified dates."""
+    from portfolio_core.db import (
+        create_all_tables,
+        ingest_custom_asset_time_series
+    )
+    from sqlalchemy import text
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    # Mock yf.Ticker to avoid external network calls during unit test
+    class MockTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+            self.history_metadata = {"currency": "USD"}
+            self.fast_info = type("obj", (), {"currency": "USD"})()
+            self.info = {"currency": "USD"}
+
+        def history(self, start=None, end=None, period=None):
+            dates = pd.date_range("2024-07-01", "2026-09-26", freq="B")
+            df = pd.DataFrame({
+                "Open": 100.0,
+                "High": 105.0,
+                "Low": 99.0,
+                "Close": 102.0,
+                "Volume": 5000,
+                "Dividends": 0.0,
+                "Stock Splits": 0.0
+            }, index=dates)
+            df.index.name = "Date"
+            return df
+
+    monkeypatch.setattr("portfolio_core.db.yf.Ticker", MockTicker)
+
+    res = ingest_custom_asset_time_series(
+        tickers="MSFT",
+        start_date="2024-07-01",
+        end_date="2026-09-24",
+        engine=eng
+    )
+
+    assert res["status"] == "success"
+    assert "MSFT" in res["tickers_processed"]
+    assert res["total_rows_added"] > 0
+
+    with eng.connect() as conn:
+        cnt = conn.execute(text("SELECT COUNT(*) FROM ASSET_PRICES WHERE TICKER = 'MSFT'")).scalar()
+        assert cnt > 0
+        max_dt = conn.execute(text("SELECT MAX(DATE) FROM ASSET_PRICES WHERE TICKER = 'MSFT'")).scalar()
+        assert max_dt <= "2026-09-24"
+        min_dt = conn.execute(text("SELECT MIN(DATE) FROM ASSET_PRICES WHERE TICKER = 'MSFT'")).scalar()
+        assert min_dt >= "2024-07-01"
+
+
+def test_refresh_all_market_data(sqlite_test_engine, monkeypatch):
+    """Verify refresh_all_market_data clears and repopulates market data tables."""
+    from portfolio_core.db import (
+        create_all_tables,
+        refresh_all_market_data
+    )
+    from sqlalchemy import text
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    with eng.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME)
+            VALUES ('2024-01-02', 'AAPL', 'USD', 150, 155, 149, 152, 1000)
+        """))
+        conn.execute(text("""
+            INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY)
+            VALUES (1, 'AAPL', '2024-01-05', 10.0)
+        """))
+
+    class MockTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+            self.history_metadata = {"currency": "USD"}
+            self.fast_info = type("obj", (), {"currency": "USD"})()
+            self.info = {"currency": "USD"}
+
+        def history(self, start=None, end=None, period=None):
+            dates = pd.date_range("2024-01-02", "2026-09-24", freq="B")
+            df = pd.DataFrame({
+                "Open": 150.0,
+                "High": 155.0,
+                "Low": 149.0,
+                "Close": 152.0,
+                "Volume": 1000,
+                "Dividends": 0.0,
+                "Stock Splits": 0.0
+            }, index=dates)
+            df.index.name = "Date"
+            return df
+
+    monkeypatch.setattr("portfolio_core.db.yf.Ticker", MockTicker)
+
+    res = refresh_all_market_data(engine=eng, end_date="2026-09-24")
+    assert res["status"] == "success"
+    assert "AAPL" in res["tickers_refreshed"]
+    assert res["cleared_counts"]["ASSET_PRICES"] == 1
+    assert res["price_records_stored"] > 0
+
+

@@ -869,29 +869,40 @@ def fetch_portfolio_positions(asof_date=None, asof=None, engine=None):
         return {row["TICKER"]: float(row["shares"]) for row in positions}
 
 
-def fetch_and_store_ticker(ticker: str, shares: float = 0.0, history_days: int = 520, connection_string: Optional[str] = None, engine=None):
+def fetch_and_store_ticker(
+    ticker: str,
+    shares: float = 0.0,
+    history_days: int = 520,
+    connection_string: Optional[str] = None,
+    engine=None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     """
     Fetches and backfills daily price and dividend history from yfinance for a given ticker,
-    ensuring at least `history_days` (default: 520) of continuous price history up to today.
+    ensuring continuous price history up to today or end_date.
     Inserts only new/missing dates into ASSET_PRICES.
     """
     engine = get_engine(engine or connection_string)
     create_all_tables(engine)
     
-    # Calculate target calendar start date for the required history_days (e.g. 520 trading days ~ 780 calendar days)
-    cal_days = int(history_days * 1.5)
-    target_start = (pd.Timestamp.now() - pd.Timedelta(days=cal_days)).strftime("%Y-%m-%d")
-    
-    # Ensure target_start is at least as early as the earliest transaction in TRANSACTIONS
-    try:
-        with engine.connect() as conn:
-            min_tx = conn.execute(text("SELECT MIN(`TRANSACTION_DATE`) FROM `TRANSACTIONS`")).scalar()
-            if min_tx:
-                min_tx_str = (pd.to_datetime(min_tx) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-                if min_tx_str < target_start:
-                    target_start = min_tx_str
-    except Exception:
-        pass
+    # Calculate target calendar start date
+    if start_date:
+        target_start = str(start_date)[:10]
+    else:
+        cal_days = int(history_days * 1.5)
+        target_start = (pd.Timestamp.now() - pd.Timedelta(days=cal_days)).strftime("%Y-%m-%d")
+        
+        # Ensure target_start is at least as early as the earliest transaction in TRANSACTIONS
+        try:
+            with engine.connect() as conn:
+                min_tx = conn.execute(text("SELECT MIN(`TRANSACTION_DATE`) FROM `TRANSACTIONS`")).scalar()
+                if min_tx:
+                    min_tx_str = (pd.to_datetime(min_tx) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+                    if min_tx_str < target_start:
+                        target_start = min_tx_str
+        except Exception:
+            pass
     
     existing_dates = set()
     latest_date = None
@@ -920,10 +931,15 @@ def fetch_and_store_ticker(ticker: str, shares: float = 0.0, history_days: int =
     else:
         fetch_start = target_start
 
+    yf_end = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") if end_date else None
+
     hist = pd.DataFrame()
     for attempt in range(3):
         try:
-            hist = stock.history(start=fetch_start)
+            if yf_end:
+                hist = stock.history(start=fetch_start, end=yf_end)
+            else:
+                hist = stock.history(start=fetch_start)
             if not hist.empty:
                 break
         except Exception:
@@ -966,6 +982,11 @@ def fetch_and_store_ticker(ticker: str, shares: float = 0.0, history_days: int =
         hist["DATE"] = pd.to_datetime(hist["DATE"]).dt.strftime("%Y-%m-%d")
         hist["TICKER"] = ticker
         hist["CURRENCY"] = currency
+
+        if start_date:
+            hist = hist[hist["DATE"] >= str(start_date)[:10]]
+        if end_date:
+            hist = hist[hist["DATE"] <= str(end_date)[:10]]
         
         # Filter out rows that already exist in ASSET_PRICES
         if existing_dates:
@@ -1107,7 +1128,14 @@ def get_foreign_currencies_from_prices(engine=None):
     return [curr for curr in currencies if curr.strip() != "GBP"]
 
 
-def fetch_and_store_fx_rate(from_curr: str, to_curr: str = "GBP", connection_string: Optional[str] = None, engine=None):
+def fetch_and_store_fx_rate(
+    from_curr: str,
+    to_curr: str = "GBP",
+    connection_string: Optional[str] = None,
+    engine=None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     """
     Fetches exchange rate history from yfinance for from_curr/to_curr (with 0.01 for GBp)
     and appends incremental rows to FX_RATES.
@@ -1131,13 +1159,18 @@ def fetch_and_store_fx_rate(from_curr: str, to_curr: str = "GBP", connection_str
 
         with engine.connect() as conn:
             query = "SELECT DISTINCT `DATE` FROM `ASSET_PRICES` WHERE `CURRENCY` = :from_curr"
+            params: Dict[str, Any] = {"from_curr": from_curr_raw}
             if latest_date:
                 query += " AND `DATE` > :latest_date"
+                params["latest_date"] = latest_date
+            if start_date:
+                query += " AND `DATE` >= :start_date"
+                params["start_date"] = str(start_date)[:10]
+            if end_date:
+                query += " AND `DATE` <= :end_date"
+                params["end_date"] = str(end_date)[:10]
             query += " ORDER BY `DATE` ASC"
-            dates = conn.execute(
-                text(query),
-                {"from_curr": from_curr_raw, "latest_date": latest_date} if latest_date else {"from_curr": from_curr_raw}
-            ).scalars().all()
+            dates = conn.execute(text(query), params).scalars().all()
             
         if dates:
             rows = pd.DataFrame({
@@ -1176,11 +1209,16 @@ def fetch_and_store_fx_rate(from_curr: str, to_curr: str = "GBP", connection_str
     pair_ticker = f"{from_curr_clean}{to_curr_clean}=X"
     stock = yf.Ticker(pair_ticker)
     
+    yf_end = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") if end_date else None
+
     # If historical FX coverage does not reach earliest asset price date, fetch 5 years
-    if earliest_asset_date and (earliest_fx_date is None or pd.to_datetime(earliest_fx_date) > pd.to_datetime(earliest_asset_date)):
+    if start_date:
+        fetch_start = str(start_date)[:10]
+        hist = stock.history(start=fetch_start, end=yf_end) if yf_end else stock.history(start=fetch_start)
+    elif earliest_asset_date and (earliest_fx_date is None or pd.to_datetime(earliest_fx_date) > pd.to_datetime(earliest_asset_date)):
         hist = stock.history(period="5y")
     elif latest_fx_date:
-        hist = stock.history(start=str(latest_fx_date))
+        hist = stock.history(start=str(latest_fx_date), end=yf_end) if yf_end else stock.history(start=str(latest_fx_date))
     else:
         hist = stock.history(period="5y")
         
@@ -1188,6 +1226,10 @@ def fetch_and_store_fx_rate(from_curr: str, to_curr: str = "GBP", connection_str
         hist = hist.reset_index()
         hist.columns = [col.replace(" ", "_").upper() for col in hist.columns]
         hist["DATE"] = pd.to_datetime(hist["DATE"]).dt.strftime("%Y-%m-%d")
+        if start_date:
+            hist = hist[hist["DATE"] >= str(start_date)[:10]]
+        if end_date:
+            hist = hist[hist["DATE"] <= str(end_date)[:10]]
         hist["FROM_CURRENCY"] = from_curr_raw
         hist["TO_CURRENCY"] = to_curr_clean
         hist["RATE"] = hist["CLOSE"]
@@ -4042,6 +4084,385 @@ def sync_benchmark_transactions_and_risk(
         "risk_stats": risk_res,
         "message": f"Successfully synced benchmark transactions and regenerated benchmark values and risk numbers for subsequent days from {earliest_date}."
     }
+
+
+def fetch_asset_market_data_overview(engine: Optional[Engine] = None) -> pd.DataFrame:
+    """
+    Returns an overview DataFrame of all assets across:
+      1. ASSET_PRICES (available market data, first/last date, record count, currency)
+      2. TRANSACTIONS (portfolio trades)
+      3. BENCHMARK_TRANSACTIONS and BENCHMARKS (benchmark constituents)
+
+    Assets with trades or benchmark constituents that have 0 market data rows
+    are included with STATUS='Missing Market Data' and null dates.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    # 1. Query market data summaries from ASSET_PRICES
+    price_info: Dict[str, Dict[str, Any]] = {}
+    with eng.connect() as conn:
+        price_rows = conn.execute(
+            text("""
+                SELECT 
+                    `TICKER`, 
+                    MIN(`DATE`) AS first_date, 
+                    MAX(`DATE`) AS last_date, 
+                    COUNT(*) AS record_count, 
+                    MAX(`CURRENCY`) AS currency 
+                FROM `ASSET_PRICES` 
+                WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''
+                GROUP BY `TICKER`
+            """)
+        ).fetchall()
+        for r in price_rows:
+            ticker = str(r[0]).strip().upper()
+            price_info[ticker] = {
+                "first_date": str(r[1]) if r[1] is not None else None,
+                "last_date": str(r[2]) if r[2] is not None else None,
+                "record_count": int(r[3] or 0),
+                "currency": str(r[4]) if r[4] is not None else None,
+            }
+
+    # 2. Query tickers from TRANSACTIONS
+    tx_tickers: Set[str] = set()
+    with eng.connect() as conn:
+        tx_rows = conn.execute(
+            text("SELECT DISTINCT `TICKER` FROM `TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")
+        ).scalars().all()
+        for t in tx_rows:
+            if t:
+                tx_tickers.add(str(t).strip().upper())
+
+    # 3. Query tickers from BENCHMARK_TRANSACTIONS
+    bm_tx_tickers: Set[str] = set()
+    with eng.connect() as conn:
+        bm_tx_rows = conn.execute(
+            text("SELECT DISTINCT `TICKER` FROM `BENCHMARK_TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")
+        ).scalars().all()
+        for t in bm_tx_rows:
+            if t:
+                bm_tx_tickers.add(str(t).strip().upper())
+
+    # 4. Query constituent tickers from BENCHMARKS
+    bm_const_tickers: Set[str] = set()
+    with eng.connect() as conn:
+        bm_rows = conn.execute(
+            text("SELECT `CONSTITUENTS_JSON` FROM `BENCHMARKS` WHERE `CONSTITUENTS_JSON` IS NOT NULL")
+        ).scalars().all()
+        for c_json in bm_rows:
+            try:
+                c_dict = json.loads(c_json)
+                for k in c_dict.keys():
+                    if k:
+                        bm_const_tickers.add(str(k).strip().upper())
+            except Exception:
+                pass
+
+    # 5. Union of all tickers
+    all_tickers = sorted(list(set(list(price_info.keys()) + list(tx_tickers) + list(bm_tx_tickers) + list(bm_const_tickers))))
+
+    rows = []
+    for ticker in all_tickers:
+        has_prices = ticker in price_info and price_info[ticker]["record_count"] > 0
+        p_data = price_info.get(ticker, {})
+
+        first_date = p_data.get("first_date")
+        last_date = p_data.get("last_date")
+        records = p_data.get("record_count", 0)
+        currency = p_data.get("currency") or "-"
+
+        sources = []
+        if ticker in tx_tickers:
+            sources.append("Portfolio Trade")
+        if ticker in bm_tx_tickers or ticker in bm_const_tickers:
+            sources.append("Benchmark Constituent")
+        if has_prices and not sources:
+            sources.append("Market Data Only")
+        elif has_prices:
+            sources.append("Market Data")
+
+        source_str = ", ".join(sources) if sources else "Unknown"
+        status = "Available" if has_prices else "Missing Market Data"
+
+        rows.append({
+            "TICKER": ticker,
+            "FIRST_DATE": first_date,
+            "LAST_DATE": last_date,
+            "RECORDS": records,
+            "CURRENCY": currency,
+            "SOURCE": source_str,
+            "STATUS": status,
+        })
+
+    df = pd.DataFrame(rows, columns=["TICKER", "FIRST_DATE", "LAST_DATE", "RECORDS", "CURRENCY", "SOURCE", "STATUS"])
+    return df
+
+
+def ingest_custom_asset_time_series(
+    tickers: Union[str, List[str]],
+    start_date: str = "2024-07-01",
+    end_date: Optional[str] = None,
+    engine: Optional[Engine] = None,
+) -> Dict[str, Any]:
+    """
+    Ingests daily price history and FX rates for specified ticker(s) over a custom date range.
+    Prepopulated start_date defaults to 2024-07-01 (1 Jul 2024).
+    end_date defaults to get_latest_processed_date(engine=engine) or today.
+    Ensures strict bounding to end_date.
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    if isinstance(tickers, str):
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    elif isinstance(tickers, (list, tuple, set)):
+        ticker_list = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    else:
+        ticker_list = [str(tickers).strip().upper()]
+
+    if not ticker_list:
+        return {
+            "status": "warning",
+            "message": "No valid tickers provided.",
+            "tickers_processed": [],
+            "tickers_failed": [],
+            "total_rows_added": 0,
+        }
+
+    start_str = str(start_date)[:10] if start_date else "2024-07-01"
+    if end_date is None:
+        end_str = get_latest_processed_date(engine=eng) or pd.Timestamp.now().strftime("%Y-%m-%d")
+    else:
+        end_str = str(end_date)[:10]
+
+    if start_str > end_str:
+        raise ValueError(f"Start date ({start_str}) cannot be after end date ({end_str}).")
+
+    processed = []
+    failed = []
+    total_rows = 0
+
+    for ticker in ticker_list:
+        try:
+            res = fetch_and_store_ticker(
+                ticker=ticker,
+                start_date=start_str,
+                end_date=end_str,
+                engine=eng
+            )
+            if res and res.get("Rows Written", 0) >= 0:
+                rows_w = res.get("Rows Written", 0)
+                total_rows += rows_w
+                curr = res.get("Currency")
+                if curr and curr.strip().upper() not in ("GBP", "GBX", "GBP_PENCE", "GBP"):
+                    try:
+                        fetch_and_store_fx_rate(curr, "GBP", start_date=start_str, end_date=end_str, engine=eng)
+                    except Exception:
+                        pass
+                elif curr and curr.strip() in ("GBp", "GBX"):
+                    try:
+                        fetch_and_store_fx_rate("GBp", "GBP", engine=eng)
+                    except Exception:
+                        pass
+                processed.append({"ticker": ticker, "rows": rows_w, "currency": curr})
+            else:
+                failed.append(ticker)
+        except Exception:
+            failed.append(ticker)
+
+    # Backfill missing prices and FX rates to align series
+    bf_prices = backfill_missing_prices(engine=eng)
+    bf_fx = backfill_missing_fx_rates(engine=eng)
+
+    # Strictly enforce end_date bound
+    delete_data_after_date(end_str, engine=eng, include_transactions=False)
+
+    return {
+        "status": "success" if processed else "warning",
+        "start_date": start_str,
+        "end_date": end_str,
+        "tickers_processed": [p["ticker"] for p in processed],
+        "tickers_failed": failed,
+        "details": processed,
+        "total_rows_added": total_rows,
+        "price_backfilled": bf_prices.get("rows_backfilled", 0) if isinstance(bf_prices, dict) else 0,
+        "fx_backfilled": bf_fx.get("rows_backfilled", 0) if isinstance(bf_fx, dict) else 0,
+        "message": f"Successfully ingested time series for {len(processed)} ticker(s) between {start_str} and {end_str}."
+    }
+
+
+def refresh_all_market_data(
+    engine: Optional[Engine] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    history_days: int = 750,
+) -> Dict[str, Any]:
+    """
+    Clears market data tables (ASSET_PRICES and FX_RATES) and repopulates them
+    for:
+      - All currently available assets in ASSET_PRICES
+      - All assets with trades in TRANSACTIONS
+      - All assets with benchmark trades or constituents in BENCHMARK_TRANSACTIONS and BENCHMARKS
+
+    Re-evaluates dividend cashflows, daily portfolio values, and benchmark values up to end_date.
+    Strictly bounds data to end_date (defaults to latest processed date).
+    """
+    eng = engine or get_engine()
+    create_all_tables(eng)
+
+    if end_date is None:
+        end_str = get_latest_processed_date(engine=eng) or pd.Timestamp.now().strftime("%Y-%m-%d")
+    else:
+        end_str = str(end_date)[:10]
+
+    # 1. Discover all tickers BEFORE clearing market data tables
+    universe: Set[str] = set()
+    with eng.connect() as conn:
+        # Existing in ASSET_PRICES
+        p_ticks = conn.execute(text("SELECT DISTINCT `TICKER` FROM `ASSET_PRICES` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")).scalars().all()
+        for t in p_ticks:
+            if t:
+                universe.add(str(t).strip().upper())
+
+        # Existing in TRANSACTIONS
+        tx_ticks = conn.execute(text("SELECT DISTINCT `TICKER` FROM `TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")).scalars().all()
+        for t in tx_ticks:
+            if t:
+                universe.add(str(t).strip().upper())
+
+        # Existing in BENCHMARK_TRANSACTIONS
+        bm_tx_ticks = conn.execute(text("SELECT DISTINCT `TICKER` FROM `BENCHMARK_TRANSACTIONS` WHERE `TICKER` IS NOT NULL AND `TICKER` <> ''")).scalars().all()
+        for t in bm_tx_ticks:
+            if t:
+                universe.add(str(t).strip().upper())
+
+        # Existing in BENCHMARKS
+        bm_rows = conn.execute(text("SELECT `CONSTITUENTS_JSON` FROM `BENCHMARKS` WHERE `CONSTITUENTS_JSON` IS NOT NULL")).scalars().all()
+        for b_json in bm_rows:
+            try:
+                c_map = json.loads(b_json)
+                for k in c_map.keys():
+                    if k:
+                        universe.add(str(k).strip().upper())
+            except Exception:
+                pass
+
+        # Determine start date
+        if start_date is None:
+            min_tx = conn.execute(text("SELECT MIN(`TRANSACTION_DATE`) FROM `TRANSACTIONS`")).scalar()
+            if min_tx:
+                min_tx_str = str(min_tx)[:10]
+                start_str = min("2024-01-01", min_tx_str)
+            else:
+                start_str = "2024-01-01"
+        else:
+            start_str = str(start_date)[:10]
+
+    all_tickers = sorted(list(universe))
+    if not all_tickers:
+        return {
+            "status": "warning",
+            "message": "No assets found across ASSET_PRICES, TRANSACTIONS, or BENCHMARKS to refresh.",
+            "tickers_total": 0,
+            "tickers_refreshed": [],
+            "tickers_failed": [],
+        }
+
+    # 2. Clear market data tables (ASSET_PRICES and FX_RATES)
+    is_sqlite = (eng.dialect.name == "sqlite")
+    cleared_counts = {}
+    with eng.begin() as conn:
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+        for tbl in ["ASSET_PRICES", "FX_RATES"]:
+            try:
+                cnt = conn.execute(text(f"SELECT COUNT(*) FROM `{tbl}`")).scalar()
+                cleared_counts[tbl] = int(cnt or 0)
+                conn.execute(text(f"DELETE FROM `{tbl}`;"))
+            except Exception:
+                cleared_counts[tbl] = 0
+        if not is_sqlite:
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+
+    # 3. Repopulate prices for all discovered tickers
+    refreshed = []
+    failed = []
+    current_positions = fetch_portfolio_positions(engine=eng)
+
+    for ticker in all_tickers:
+        sh = current_positions.get(ticker, 0.0)
+        try:
+            res = fetch_and_store_ticker(
+                ticker=ticker,
+                shares=sh,
+                history_days=history_days,
+                start_date=start_str,
+                end_date=end_str,
+                engine=eng
+            )
+            if res and (res.get("Rows Written", 0) > 0 or res.get("Total Observations", 0) > 0):
+                refreshed.append(ticker)
+            else:
+                failed.append(ticker)
+        except Exception:
+            failed.append(ticker)
+
+    # 4. Backfill missing prices
+    bf_prices = backfill_missing_prices(engine=eng)
+
+    # 5. Ingest FX rates for non-GBP currencies
+    foreign_currencies = get_foreign_currencies_from_prices(engine=eng)
+    for curr in foreign_currencies:
+        try:
+            fetch_and_store_fx_rate(curr, "GBP", start_date=start_str, end_date=end_str, engine=eng)
+        except Exception:
+            pass
+
+    # 6. Backfill missing FX rates
+    bf_fx = backfill_missing_fx_rates(engine=eng)
+
+    # 7. Strictly prune rows beyond end_date
+    delete_data_after_date(end_str, engine=eng, include_transactions=False)
+
+    # 8. Recompute downstream valuations
+    try:
+        collect_and_store_dividend_cashflows_and_cash_account(engine=eng)
+    except Exception:
+        pass
+
+    try:
+        calculate_and_store_daily_portfolio_values(backfill_days=-1, engine=eng)
+    except Exception:
+        pass
+
+    try:
+        calculate_and_store_daily_benchmark_values(engine=eng, sync_transactions=True, asof_date=end_str)
+    except Exception:
+        pass
+
+    delete_data_after_date(end_str, engine=eng, include_transactions=False)
+
+    # Count final price and FX rows
+    with eng.connect() as conn:
+        final_price_rows = conn.execute(text("SELECT COUNT(*) FROM `ASSET_PRICES`")).scalar() or 0
+        final_fx_rows = conn.execute(text("SELECT COUNT(*) FROM `FX_RATES`")).scalar() or 0
+
+    return {
+        "status": "success",
+        "start_date": start_str,
+        "end_date": end_str,
+        "cleared_counts": cleared_counts,
+        "tickers_total": len(all_tickers),
+        "tickers_refreshed": refreshed,
+        "tickers_failed": failed,
+        "price_records_stored": int(final_price_rows),
+        "fx_records_stored": int(final_fx_rows),
+        "price_records_backfilled": bf_prices.get("rows_backfilled", 0) if isinstance(bf_prices, dict) else 0,
+        "fx_records_backfilled": bf_fx.get("rows_backfilled", 0) if isinstance(bf_fx, dict) else 0,
+        "message": f"Successfully cleared and repopulated market data for {len(refreshed)}/{len(all_tickers)} assets up to {end_str}."
+    }
+
 
 
 

@@ -604,6 +604,53 @@ def test_admin_panel_functions_and_wiring(sqlite_test_engine):
     assert res_empty["status"] == "warning"
 
 
+def test_tab_market_data_imports_and_structure(sqlite_test_engine):
+    """Verifies that render_tab_market_data can be imported and executed, and overview table renders."""
+    try:
+        from src.ui.tab_market_data import render_tab_market_data
+    except ImportError:
+        from apps.dashboard.src.ui.tab_market_data import render_tab_market_data
+
+    from portfolio_core.db import (
+        create_all_tables,
+        fetch_asset_market_data_overview,
+        get_latest_processed_date
+    )
+    from sqlalchemy import text
+
+    engine = sqlite_test_engine
+    create_all_tables(engine)
+
+    # 1. Insert test prices and transactions
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME)
+            VALUES 
+                ('2024-07-01', 'NVDA', 'USD', 100, 105, 99, 102, 1000),
+                ('2026-09-24', 'NVDA', 'USD', 120, 125, 119, 122, 1000)
+        """))
+        conn.execute(text("""
+            INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY)
+            VALUES (1, 'UNTRADED_SYM', '2024-08-01', 5.0)
+        """))
+
+    overview = fetch_asset_market_data_overview(engine=engine)
+    assert not overview.empty
+    tickers = set(overview["TICKER"].tolist())
+    assert "NVDA" in tickers
+    assert "UNTRADED_SYM" in tickers
+
+    # Untraded sym should show Missing Market Data
+    untraded = overview[overview["TICKER"] == "UNTRADED_SYM"].iloc[0]
+    assert untraded["STATUS"] == "Missing Market Data"
+    assert pd.isna(untraded["FIRST_DATE"])
+    assert untraded["RECORDS"] == 0
+
+    latest_proc = get_latest_processed_date(engine=engine)
+    assert latest_proc == "2026-09-24"
+
+
+
 
 
 
