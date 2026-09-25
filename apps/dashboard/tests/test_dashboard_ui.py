@@ -329,6 +329,13 @@ def test_load_cached_data_parallel():
     assert "bm_history_df" in bundle
     assert "transactions_df" in bundle
     assert "raw_prices_cache" in bundle
+    assert "processed_dates" in bundle
+    assert "latest_processed_date" in bundle
+    assert isinstance(bundle["processed_dates"], list)
+
+    # Test explicit asof_date anchoring
+    bundle_asof = load_cached_data_parallel("stocks_dev", asof_date="2026-09-24", _engine=test_engine)
+    assert bundle_asof["latest_processed_date"] == "2026-09-24"
 
     # Verify legacy compatibility wrapper
     prices, tickers, pos, vdates = load_cached_data("stocks_dev", _engine=test_engine)
@@ -336,6 +343,46 @@ def test_load_cached_data_parallel():
     assert isinstance(tickers, list)
     assert isinstance(pos, dict)
     assert isinstance(vdates, list)
+
+
+def test_tab_portfolio_with_processed_dates(sqlite_test_engine, monkeypatch):
+    """Verify render_tab_portfolio behaves correctly with processed_dates and date selection."""
+    from portfolio_core.db import create_all_tables, seed_initial_processed_dates
+    try:
+        from src.ui.tab_portfolio import render_tab_portfolio
+    except ImportError:
+        from apps.dashboard.src.ui.tab_portfolio import render_tab_portfolio
+
+    sqlite_engine = sqlite_test_engine
+    create_all_tables(sqlite_engine)
+
+    dates = pd.date_range("2026-09-01", periods=10, freq="B")
+    prices_df = pd.DataFrame({
+        "NVDA": [100.0 + i for i in range(10)],
+        "AAPL": [150.0 + i * 2 for i in range(10)]
+    }, index=dates)
+    positions = {"NVDA": 10.0, "AAPL": 5.0}
+
+    pv_df = pd.DataFrame({
+        "DATE": dates,
+        "TOTAL_VALUE": [2000.0 + i * 50 for i in range(10)],
+        "STOCKS": [1800.0 + i * 40 for i in range(10)],
+        "CASH": [200.0 + i * 10 for i in range(10)],
+        "CURRENCY": ["GBP"] * 10
+    })
+
+    proc_dates = [d.strftime("%Y-%m-%d") for d in dates[::-1]]
+
+    # Should execute successfully without throwing exceptions
+    render_tab_portfolio(
+        prices_gbp=prices_df,
+        positions=positions,
+        asof_date="2026-09-12",
+        engine=sqlite_engine,
+        db_name="stocks_dev",
+        pv_df=pv_df,
+        processed_dates=proc_dates
+    )
 
 
 def test_tab_portfolio_valuation_history_filtering():
@@ -503,6 +550,59 @@ def test_tab_backtesting_imports_and_pipeline():
     assert diag["uniformity"].sample_size == 40
     assert hasattr(diag["uniformity"], "calibration_quality")
     assert isinstance(diag["uniformity"].calibration_quality, str)
+
+
+def test_admin_panel_functions_and_wiring(sqlite_test_engine):
+    """Verifies that Admin Panel functions (get dates, delete current day, trigger download) work end-to-end."""
+    from portfolio_core.db import (
+        create_all_tables,
+        get_target_download_date,
+        get_current_day_delete_date,
+        delete_data_for_date,
+        trigger_data_download
+    )
+    from sqlalchemy import text
+
+    engine = sqlite_test_engine
+    create_all_tables(engine)
+
+    # 1. Target dates resolution
+    dl_date = get_target_download_date("2026-09-26")  # Saturday
+    assert dl_date == "2026-09-25"  # Last weekday (Friday)
+
+    del_date = get_current_day_delete_date(engine=engine, asof="2026-09-25")
+    assert del_date == "2026-09-25"
+
+    # 2. Insert records for del_date in PORTFOLIO_VALUES and ASSET_PRICES
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO PORTFOLIO_VALUES (DATE, TOTAL_VALUE, STOCKS, CASH, CURRENCY) VALUES ('2026-09-25', 1000.0, 900.0, 100.0, 'GBP')"))
+        conn.execute(text("INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME) VALUES ('2026-09-25', 'NVDA', 'USD', 120, 125, 119, 122, 5000)"))
+        conn.execute(text("INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY) VALUES (1, 'NVDA', '2026-09-25', 10.0)"))
+
+    # Verify rows exist
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM PORTFOLIO_VALUES WHERE DATE = '2026-09-25'")).scalar() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM ASSET_PRICES WHERE DATE = '2026-09-25'")).scalar() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM TRANSACTIONS WHERE TRANSACTION_DATE = '2026-09-25'")).scalar() == 1
+
+    # 3. Simulate "Delete Current Day" action
+    del_res = delete_data_for_date(del_date, engine=engine, include_transactions=False)
+    assert del_res["PORTFOLIO_VALUES"] == 1
+    assert del_res["ASSET_PRICES"] == 1
+    assert "TRANSACTIONS" not in del_res
+
+    # Verify market data pruned but manual transactions strictly preserved
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM PORTFOLIO_VALUES WHERE DATE = '2026-09-25'")).scalar() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM ASSET_PRICES WHERE DATE = '2026-09-25'")).scalar() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM TRANSACTIONS WHERE TRANSACTION_DATE = '2026-09-25'")).scalar() == 1
+
+    # 4. Trigger download with empty tickers (should return warning gracefully)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM TRANSACTIONS"))
+    res_empty = trigger_data_download(target_date=dl_date, engine=engine)
+    assert res_empty["status"] == "warning"
+
 
 
 

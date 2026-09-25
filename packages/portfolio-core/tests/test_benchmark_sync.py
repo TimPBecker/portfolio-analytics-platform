@@ -249,3 +249,53 @@ def test_sync_benchmark_transactions_and_risk_end_to_end(sqlite_test_engine):
     res_sync3 = sync_benchmark_transactions_and_risk(engine=engine, min_lookback=2, lookback_days=5)
     assert res_sync3["synced"] is True
     assert res_sync3["regenerated"] is False
+
+
+def test_benchmark_values_creation_bounded_to_last_successful_date(sqlite_test_engine):
+    """
+    Regression test: Verifies that benchmark generation and calculation strictly creates
+    benchmark values up to the last successful processed date, never creating more recent data.
+    """
+    from portfolio_core.db import (
+        record_processed_date,
+        get_latest_processed_date,
+        fetch_benchmark_values_history,
+        calculate_and_store_daily_benchmark_values
+    )
+
+    engine = sqlite_test_engine
+    create_all_tables(engine)
+
+    dates = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]
+
+    # Insert transactions and market prices across all 7 days
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO TRANSACTIONS (ID, TICKER, TRANSACTION_DATE, QUANTITY) VALUES (1, 'NVDA', '2026-08-01', 10.0)"))
+        for i, d in enumerate(dates):
+            conn.execute(text(f"INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME) VALUES ('{d}', 'NVDA', 'USD', 100, 105, 95, 100, 1000)"))
+            conn.execute(text(f"INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME) VALUES ('{d}', 'CSP1.L', 'GBP', 50, 55, 45, 50, 500)"))
+            conn.execute(text(f"INSERT INTO FX_RATES (DATE, FROM_CURRENCY, TO_CURRENCY, RATE) VALUES ('{d}', 'USD', 'GBP', 0.8)"))
+
+    # 1. Set the last successful processed date to 2026-08-04
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM `PROCESSED_DATES`"))
+    record_processed_date("2026-08-04", status="SUCCESS", engine=engine)
+    assert get_latest_processed_date(engine=engine) == "2026-08-04"
+
+    # 2. Add benchmark and calculate daily values
+    add_benchmark(constituents="CSP1.L: 100", benchmark_code="CSP1.L_100", engine=engine)
+    res = calculate_and_store_daily_benchmark_values(engine=engine)
+    assert res["records_stored"] > 0
+
+    # 3. Verify BENCHMARK_VALUES contains NO records beyond 2026-08-04
+    bm_vals = fetch_benchmark_values_history(benchmark_code="CSP1.L_100", engine=engine)
+    assert not bm_vals.empty
+    max_bm_date = str(bm_vals["DATE"].max())[:10]
+    assert max_bm_date == "2026-08-04"
+
+    # 4. Verify explicit asof_date cutoff works as well (e.g. 2026-08-02)
+    res_cutoff = calculate_and_store_daily_benchmark_values(engine=engine, asof_date="2026-08-02")
+    bm_vals_cutoff = fetch_benchmark_values_history(benchmark_code="CSP1.L_100", engine=engine)
+    max_cutoff_date = str(bm_vals_cutoff["DATE"].max())[:10]
+    assert max_cutoff_date == "2026-08-02"
+
