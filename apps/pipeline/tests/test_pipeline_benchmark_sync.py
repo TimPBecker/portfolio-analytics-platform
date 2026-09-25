@@ -26,10 +26,13 @@ from portfolio_core.db import (
     check_benchmark_transactions_coverage,
     fetch_stored_var_metrics,
     fetch_benchmark_transactions,
+    is_date_processed,
 )
 from repo import (
     portfolio_daily_values,
+    portfolio_value_at_risk,
     PortfolioValuesConfig,
+    RiskConfig,
     run_risk_pipeline,
 )
 
@@ -127,3 +130,54 @@ def test_run_risk_pipeline_auto_sync_on_new_transaction(sqlite_test_engine):
 
     # Assert that shadow transactions were generated
     assert check_benchmark_transactions_coverage(engine=engine)["is_synced"] is True
+
+
+def test_portfolio_value_at_risk_records_processed_date(sqlite_test_engine):
+    """
+    Verifies that portfolio_value_at_risk records the asof_date in PROCESSED_DATES
+    with status='SUCCESS' before the telegram report step.
+    """
+    engine = sqlite_test_engine
+
+    # Seed 10 days of price data
+    dates = pd.date_range("2026-08-01", periods=10, freq="B").strftime("%Y-%m-%d")
+    price_records = []
+    for i, d in enumerate(dates):
+        price_records.extend([
+            {"DATE": d, "TICKER": "NVDA", "CLOSE": 100.0 + (i * 2.0), "CURRENCY": "GBP"},
+            {"DATE": d, "TICKER": "AAPL", "CLOSE": 150.0 + (i * 1.5), "CURRENCY": "GBP"},
+            {"DATE": d, "TICKER": "CSP1.L", "CLOSE": 500.0 + (i * 5.0), "CURRENCY": "GBP"},
+            {"DATE": d, "TICKER": "VWRL.L", "CLOSE": 80.0 + (i * 0.8), "CURRENCY": "GBP"},
+            {"DATE": d, "TICKER": "VUKE.L", "CLOSE": 30.0 + (i * 0.3), "CURRENCY": "GBP"},
+        ])
+    pd.DataFrame(price_records).to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+
+    # Record trade on Day 1
+    record_transaction(ticker="NVDA", transaction_date=dates[0], quantity=10.0, engine=engine)
+
+    target_date = dates[-1]
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM `PROCESSED_DATES` WHERE `DATE` = :d"), {"d": target_date})
+
+    assert is_date_processed(target_date, engine=engine) is False
+
+    # Mock DatabaseResource
+    db_res = MagicMock()
+    db_res.get_engine.return_value = engine
+
+    # Run portfolio_daily_values first (dependency)
+    portfolio_daily_values(config=PortfolioValuesConfig(backfill_days=0), db=db_res)
+
+    # Run portfolio_value_at_risk
+    risk_cfg = RiskConfig(
+        backfill_days=0,
+        min_lookback_days=2,
+        lookback_days=5,
+        num_permutations=10,
+    )
+    out = portfolio_value_at_risk(config=risk_cfg, db=db_res)
+    assert out.value > 0
+
+    # Verify that the target_date is now recorded as SUCCESS in PROCESSED_DATES
+    assert is_date_processed(target_date, engine=engine) is True
+
