@@ -26,7 +26,9 @@ resources:
       # Password secret is read from DB_PASSWORD in .env
 
       # --- SQLite Configuration (Commented out template) ---
-      # To switch to a local SQLite database, set type: "sqlite" above and uncomment below:
+      # To switch to a local SQLite database, set type: "sqlite" above and uncomment below.
+      # When using SQLite, host, port, user, and password are NOT needed.
+      # The database file and all 13 tables are created automatically on first run.
       # type: "sqlite"
       # sqlite_path: "stocks.s3db"  # Note: Must always have the extension .s3db
 

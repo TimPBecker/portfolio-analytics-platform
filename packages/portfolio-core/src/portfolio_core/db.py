@@ -2751,6 +2751,10 @@ if __name__ == "__main__":
         for tbl, cnt in res.items():
             print(f"  - {tbl}: {cnt:,} rows {'matched' if dry else 'deleted'}")
         print("Done.")
+    elif "--init-tables" in sys.argv or "--create-tables" in sys.argv:
+        print("Ensuring all database tables exist...")
+        create_all_tables()
+        print("All database tables successfully initialized.")
     else:
         run_full_pipeline()
 

@@ -18,7 +18,9 @@ db:
   # DB_PASSWORD is read securely from the .env environment variable
 
   # --- SQLite Configuration (Alternative) ---
-  # To use SQLite, set type: "sqlite" and configure sqlite_path:
+  # To use SQLite, set type: "sqlite" and configure sqlite_path (must end in .s3db).
+  # When using SQLite, host, port, user, and password are NOT needed.
+  # The database file and all 13 tables are created automatically on first run.
   # type: "sqlite"
   # sqlite_path: "stocks.s3db"
 
