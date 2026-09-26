@@ -676,3 +676,93 @@ def test_refresh_all_market_data(sqlite_test_engine, monkeypatch):
     assert res["price_records_stored"] > 0
 
 
+def test_fetch_asset_price_levels_and_returns(sqlite_test_engine):
+    """
+    Tests fetch_asset_price_levels_and_returns for multi-currency handling (USD, EUR, GBp pence, GBP),
+    day-on-day nominal and percentage returns, descending date ordering, and asof/ticker filtering.
+    """
+    from portfolio_core.db import (
+        create_all_tables,
+        fetch_asset_price_levels_and_returns
+    )
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    # 1. Test empty table returns expected schema
+    empty_df = fetch_asset_price_levels_and_returns(engine=eng)
+    assert empty_df.empty
+    expected_cols = [
+        "DATE", "TICKER", "CURRENCY", "CLOSE",
+        "DOD_CHANGE_NATIVE", "DOD_PCT_NATIVE",
+        "CLOSE_GBP", "DOD_CHANGE_GBP", "DOD_PCT_GBP"
+    ]
+    assert list(empty_df.columns) == expected_cols
+
+    # 2. Seed mock prices across USD, EUR, and GBp
+    mock_prices = pd.DataFrame([
+        {"DATE": "2026-08-20", "TICKER": "NVDA", "CLOSE": 100.0, "CURRENCY": "USD"},
+        {"DATE": "2026-08-21", "TICKER": "NVDA", "CLOSE": 110.0, "CURRENCY": "USD"},
+        {"DATE": "2026-08-20", "TICKER": "AMZ.DE", "CLOSE": 200.0, "CURRENCY": "EUR"},
+        {"DATE": "2026-08-21", "TICKER": "AMZ.DE", "CLOSE": 190.0, "CURRENCY": "EUR"},
+        {"DATE": "2026-08-20", "TICKER": "STAN.L", "CLOSE": 2000.0, "CURRENCY": "GBp"},
+        {"DATE": "2026-08-21", "TICKER": "STAN.L", "CLOSE": 2200.0, "CURRENCY": "GBp"},
+    ])
+    mock_prices.to_sql("ASSET_PRICES", con=eng, if_exists="append", index=False)
+
+    mock_fx = pd.DataFrame([
+        {"DATE": "2026-08-20", "FROM_CURRENCY": "USD", "TO_CURRENCY": "GBP", "RATE": 0.80},
+        {"DATE": "2026-08-21", "FROM_CURRENCY": "USD", "TO_CURRENCY": "GBP", "RATE": 0.80},
+        {"DATE": "2026-08-20", "FROM_CURRENCY": "EUR", "TO_CURRENCY": "GBP", "RATE": 0.85},
+        {"DATE": "2026-08-21", "FROM_CURRENCY": "EUR", "TO_CURRENCY": "GBP", "RATE": 0.85},
+    ])
+    mock_fx.to_sql("FX_RATES", con=eng, if_exists="append", index=False)
+
+    # 3. Retrieve all price levels
+    df = fetch_asset_price_levels_and_returns(engine=eng)
+    assert len(df) == 6
+
+    # Verify descending date order (most recent day first)
+    dates_list = df["DATE"].tolist()
+    assert dates_list[:3] == ["2026-08-21", "2026-08-21", "2026-08-21"]
+    assert dates_list[3:] == ["2026-08-20", "2026-08-20", "2026-08-20"]
+
+    # Verify NVDA on 2026-08-21: Close 110 USD, DoD +10 USD, +10.0%, GBP 88.0, DoD GBP +8.0
+    nvda_d2 = df[(df["TICKER"] == "NVDA") & (df["DATE"] == "2026-08-21")].iloc[0]
+    assert nvda_d2["CLOSE"] == 110.0
+    assert nvda_d2["CURRENCY"] == "USD"
+    assert nvda_d2["DOD_CHANGE_NATIVE"] == 10.0
+    assert pytest.approx(nvda_d2["DOD_PCT_NATIVE"]) == 10.0
+    assert pytest.approx(nvda_d2["CLOSE_GBP"]) == 88.0
+    assert pytest.approx(nvda_d2["DOD_CHANGE_GBP"]) == 8.0
+    assert pytest.approx(nvda_d2["DOD_PCT_GBP"]) == 10.0
+
+    # Verify STAN.L on 2026-08-21: Close 2200 GBp -> 22.0 GBP, DoD +200 GBp, +10.0%, DoD GBP +2.0
+    stan_d2 = df[(df["TICKER"] == "STAN.L") & (df["DATE"] == "2026-08-21")].iloc[0]
+    assert stan_d2["CLOSE"] == 2200.0
+    assert stan_d2["CURRENCY"] == "GBp"
+    assert stan_d2["DOD_CHANGE_NATIVE"] == 200.0
+    assert pytest.approx(stan_d2["DOD_PCT_NATIVE"]) == 10.0
+    assert pytest.approx(stan_d2["CLOSE_GBP"]) == 22.0
+    assert pytest.approx(stan_d2["DOD_CHANGE_GBP"]) == 2.0
+    assert pytest.approx(stan_d2["DOD_PCT_GBP"]) == 10.0
+
+    # Verify AMZ.DE on 2026-08-21: Close 190 EUR, DoD -10 EUR, -5.0%, GBP 190*0.85 = 161.5
+    amz_d2 = df[(df["TICKER"] == "AMZ.DE") & (df["DATE"] == "2026-08-21")].iloc[0]
+    assert amz_d2["CLOSE"] == 190.0
+    assert amz_d2["DOD_CHANGE_NATIVE"] == -10.0
+    assert pytest.approx(amz_d2["DOD_PCT_NATIVE"]) == -5.0
+    assert pytest.approx(amz_d2["CLOSE_GBP"]) == 161.5
+
+    # 4. Test ticker filtering
+    df_nvda = fetch_asset_price_levels_and_returns(tickers=["NVDA"], engine=eng)
+    assert len(df_nvda) == 2
+    assert set(df_nvda["TICKER"]) == {"NVDA"}
+
+    # 5. Test asof_date filtering
+    df_asof = fetch_asset_price_levels_and_returns(asof_date="2026-08-20", engine=eng)
+    assert len(df_asof) == 3
+    assert all(df_asof["DATE"] == "2026-08-20")
+
+
+
