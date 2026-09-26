@@ -299,3 +299,94 @@ def test_benchmark_values_creation_bounded_to_last_successful_date(sqlite_test_e
     max_cutoff_date = str(bm_vals_cutoff["DATE"].max())[:10]
     assert max_cutoff_date == "2026-08-02"
 
+
+# =============================================================================
+# 4. Permanent CASH Benchmark Regression Tests
+# =============================================================================
+
+def test_permanent_cash_benchmark(sqlite_test_engine):
+    """
+    Regression test: Verifies that the CASH benchmark is permanent, cannot be deleted,
+    always maintains a price of £1.00, and calculates shadow values matching capital invested.
+    """
+    from portfolio_core.db import (
+        fetch_benchmarks_info,
+        delete_benchmark,
+        add_benchmark,
+        fetch_and_store_ticker,
+        fetch_historical_prices_gbp,
+        fetch_raw_asset_prices,
+        record_transaction,
+        generate_and_store_benchmark_transactions,
+        calculate_and_store_daily_benchmark_values,
+        fetch_benchmark_values_history,
+        fetch_benchmark_transactions,
+    )
+
+    engine = sqlite_test_engine
+    create_all_tables(engine)
+
+    # 1. CASH benchmark automatically present upon schema initialization
+    bm_info = fetch_benchmarks_info(engine=engine)
+    assert not bm_info.empty
+    assert "CASH" in bm_info["BENCHMARK_CODE"].values
+    cash_row = bm_info[bm_info["BENCHMARK_CODE"] == "CASH"].iloc[0]
+    assert cash_row["NAME"] == "Cash"
+    assert "CASH" in cash_row["CONSTITUENTS_JSON"]
+
+    # 2. Deletion is strictly prevented (both uppercase and lowercase)
+    with pytest.raises(ValueError, match="permanent and cannot be deleted"):
+        delete_benchmark("CASH", engine=engine)
+
+    with pytest.raises(ValueError, match="permanent and cannot be deleted"):
+        delete_benchmark("cash", engine=engine)
+
+    # 3. Modifying CASH benchmark with invalid constituents is rejected
+    with pytest.raises(ValueError, match="must have 'CASH' as its constituent"):
+        add_benchmark(constituents="CSP1.L: 100", benchmark_code="CASH", engine=engine)
+
+    # 4. fetch_and_store_ticker for CASH generates £1.00 records without external network requests
+    res_ticker = fetch_and_store_ticker("CASH", history_days=5, engine=engine)
+    assert res_ticker["Ticker"] == "CASH"
+    assert res_ticker["Currency"] == "GBP"
+    assert res_ticker["Latest Close"] == 1.0
+
+    raw_prices = fetch_raw_asset_prices("CASH", engine=engine)
+    assert not raw_prices.empty
+    assert (raw_prices["CLOSE"] == 1.0).all()
+    assert (raw_prices["CLOSE_GBP"] == 1.0).all()
+
+    # 5. Price matrix in GBP always contains CASH with £1.00
+    prices_gbp = fetch_historical_prices_gbp(engine=engine)
+    assert not prices_gbp.empty
+    assert "CASH" in prices_gbp.columns
+    assert (prices_gbp["CASH"] == 1.0).all()
+
+    # 6. Record trade: 10 NVDA @ £100 = £1,000 GBP deployed
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME) VALUES ('2026-08-01', 'NVDA', 'GBP', 100, 100, 100, 100, 1000)"))
+        conn.execute(text("INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME) VALUES ('2026-08-02', 'NVDA', 'GBP', 105, 105, 105, 105, 1000)"))
+    record_transaction(ticker="NVDA", transaction_date="2026-08-01", quantity=10.0, engine=engine)
+
+    # 7. Generate shadow transactions: CASH must receive 1,000 units @ £1.00 = £1,000 GBP
+    bm_tx = generate_and_store_benchmark_transactions(engine=engine)
+    cash_tx = bm_tx[bm_tx["BENCHMARK_CODE"] == "CASH"]
+    assert not cash_tx.empty
+    assert cash_tx.iloc[0]["QUANTITY"] == 1000.0
+    assert cash_tx.iloc[0]["PRICE_GBP"] == 1.0
+    assert cash_tx.iloc[0]["GBP_VALUE"] == 1000.0
+
+    # 8. Calculate daily benchmark values: CASH must maintain exact £1,000 total value across days
+    val_res = calculate_and_store_daily_benchmark_values(engine=engine)
+    assert val_res["records_stored"] > 0
+
+    cash_vals = fetch_benchmark_values_history(benchmark_code="CASH", engine=engine)
+    assert not cash_vals.empty
+    day1_val = cash_vals[cash_vals["DATE"].dt.strftime("%Y-%m-%d") == "2026-08-01"].iloc[0]
+    assert float(day1_val["TOTAL_VALUE"]) == 1000.0
+    assert float(day1_val["STOCKS"]) == 1000.0
+    assert float(day1_val["CASH"]) == 0.0
+
+    day2_val = cash_vals[cash_vals["DATE"].dt.strftime("%Y-%m-%d") == "2026-08-02"].iloc[0]
+    assert float(day2_val["TOTAL_VALUE"]) == 1000.0
+

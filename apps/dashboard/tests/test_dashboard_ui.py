@@ -241,6 +241,11 @@ def test_benchmark_tables_and_shadow_calculations():
     bm_info_after_del = fetch_benchmarks_info(engine=engine)
     assert "CSP1.L_70_VUKE.L_30" not in bm_info_after_del["BENCHMARK_CODE"].values
 
+    # 9. Verify permanent CASH benchmark cannot be deleted
+    with pytest.raises(ValueError, match="permanent and cannot be deleted"):
+        delete_benchmark(benchmark_code="CASH", engine=engine)
+    assert "CASH" in bm_info_after_del["BENCHMARK_CODE"].values
+
 
 def test_quarto_report_template_discovery():
     try:
