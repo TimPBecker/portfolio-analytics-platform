@@ -2925,6 +2925,103 @@ def fetch_raw_asset_prices(
     return df
 
 
+def fetch_asset_price_levels_and_returns(
+    tickers: Optional[List[str]] = None,
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> pd.DataFrame:
+    """
+    Retrieves historical asset prices across assets in both native currency and GBP,
+    with day-on-day nominal price changes and percentage returns.
+
+    Parameters:
+        tickers: Optional list of tickers to filter by. If None, retrieves all available assets.
+        asof_date: Optional cutoff date (YYYY-MM-DD). If specified, filters records up to this date.
+        engine: Optional SQLAlchemy Engine.
+
+    Returns:
+        DataFrame with columns:
+        ['DATE', 'TICKER', 'CURRENCY', 'CLOSE', 'DOD_CHANGE_NATIVE', 'DOD_PCT_NATIVE',
+         'CLOSE_GBP', 'DOD_CHANGE_GBP', 'DOD_PCT_GBP']
+        sorted by DATE DESC, TICKER ASC (most recent day first).
+    """
+    eng = engine or get_engine()
+
+    price_where = []
+    price_params: Dict[str, Any] = {}
+
+    if asof_date:
+        price_where.append("DATE <= :asof")
+        price_params["asof"] = str(asof_date)[:10]
+
+    if tickers:
+        placeholders = [f":t_{i}" for i in range(len(tickers))]
+        price_where.append(f"TICKER IN ({', '.join(placeholders)})")
+        for i, t in enumerate(tickers):
+            price_params[f"t_{i}"] = t
+
+    where_clause = f"WHERE {' AND '.join(price_where)}" if price_where else ""
+    price_query = f"SELECT `DATE`, `TICKER`, `CLOSE`, `CURRENCY` FROM `ASSET_PRICES` {where_clause} ORDER BY `DATE` ASC"
+
+    fx_where = ["`TO_CURRENCY` = 'GBP'"]
+    fx_params: Dict[str, Any] = {}
+    if asof_date:
+        fx_where.append("`DATE` <= :asof")
+        fx_params["asof"] = str(asof_date)[:10]
+    fx_query = f"SELECT `DATE`, `FROM_CURRENCY`, `RATE` FROM `FX_RATES` WHERE {' AND '.join(fx_where)} ORDER BY `DATE` ASC"
+
+    with eng.connect() as conn:
+        prices_df = pd.read_sql(text(price_query), conn, params=price_params)
+        fx_df = pd.read_sql(text(fx_query), conn, params=fx_params)
+
+    if prices_df.empty:
+        return pd.DataFrame(columns=[
+            "DATE", "TICKER", "CURRENCY", "CLOSE",
+            "DOD_CHANGE_NATIVE", "DOD_PCT_NATIVE",
+            "CLOSE_GBP", "DOD_CHANGE_GBP", "DOD_PCT_GBP"
+        ])
+
+    prices_df["DATE"] = pd.to_datetime(prices_df["DATE"]).dt.strftime("%Y-%m-%d")
+    fx_df["DATE"] = pd.to_datetime(fx_df["DATE"]).dt.strftime("%Y-%m-%d")
+
+    all_dates = pd.DataFrame({"DATE": prices_df["DATE"].unique()})
+    gbp_fx = all_dates.copy()
+    gbp_fx["FROM_CURRENCY"] = "GBP"
+    gbp_fx["RATE"] = 1.0
+    all_fx = pd.concat([fx_df, gbp_fx], ignore_index=True).drop_duplicates(subset=["DATE", "FROM_CURRENCY"])
+
+    merged = pd.merge(prices_df, all_fx, left_on=["DATE", "CURRENCY"], right_on=["DATE", "FROM_CURRENCY"], how="left")
+    merged.loc[merged["CURRENCY"].isin(["GBp", "GBX", "GBp_PENCE", "gbp", "gbx"]) & merged["RATE"].isna(), "RATE"] = 0.01
+    merged.loc[(merged["CURRENCY"].isin(["GBP", "gbp"])) & merged["RATE"].isna(), "RATE"] = 1.0
+
+    is_pence = merged["CURRENCY"].isin(["GBp", "GBX", "GBp_PENCE", "gbp", "gbx"])
+    merged["CLOSE_GBP"] = np.where(
+        is_pence,
+        merged["CLOSE"].astype(float) / 100.0,
+        merged["CLOSE"].astype(float) * merged["RATE"].fillna(1.0).astype(float)
+    )
+
+    merged["_DATE_DT"] = pd.to_datetime(merged["DATE"])
+    merged = merged.sort_values(["TICKER", "_DATE_DT"]).reset_index(drop=True)
+
+    merged["DOD_CHANGE_NATIVE"] = merged.groupby("TICKER")["CLOSE"].diff()
+    merged["DOD_PCT_NATIVE"] = merged.groupby("TICKER")["CLOSE"].pct_change() * 100.0
+    merged["DOD_CHANGE_GBP"] = merged.groupby("TICKER")["CLOSE_GBP"].diff()
+    merged["DOD_PCT_GBP"] = merged.groupby("TICKER")["CLOSE_GBP"].pct_change() * 100.0
+
+    # Order descending by most recent date first
+    merged = merged.sort_values(["_DATE_DT", "TICKER"], ascending=[False, True]).reset_index(drop=True)
+    merged = merged.drop(columns=["_DATE_DT", "FROM_CURRENCY", "RATE"], errors="ignore")
+
+    return merged[[
+        "DATE", "TICKER", "CURRENCY", "CLOSE",
+        "DOD_CHANGE_NATIVE", "DOD_PCT_NATIVE",
+        "CLOSE_GBP", "DOD_CHANGE_GBP", "DOD_PCT_GBP"
+    ]]
+
+
+
+
 
 
 def fetch_portfolio_values_history(

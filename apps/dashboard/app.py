@@ -27,7 +27,8 @@ from portfolio_core.db import (
     get_current_day_delete_date,
     trigger_data_download,
     get_latest_processed_date,
-    fetch_processed_dates
+    fetch_processed_dates,
+    fetch_asset_price_levels_and_returns
 )
 try:
     from src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
@@ -104,6 +105,7 @@ def load_cached_data_parallel(db_name: str, asof_date: Optional[str] = None, _en
         f_bm_history = executor.submit(fetch_benchmark_values_history, asof_date=asof_date, engine=engine)
         f_tx = executor.submit(fetch_all_transactions, limit=100, engine=engine)
         f_proc_dates = executor.submit(fetch_processed_dates, engine=engine)
+        f_levels = executor.submit(fetch_asset_price_levels_and_returns, asof_date=asof_date, engine=engine)
 
         tickers = f_tickers.result()
         prices_gbp = f_prices.result()
@@ -114,6 +116,7 @@ def load_cached_data_parallel(db_name: str, asof_date: Optional[str] = None, _en
         bm_history_df = f_bm_history.result()
         transactions_df = f_tx.result()
         processed_dates = f_proc_dates.result()
+        price_levels_df = f_levels.result()
 
     if asof_date and var_dates:
         var_dates = [d for d in var_dates if d <= asof_date]
@@ -138,6 +141,7 @@ def load_cached_data_parallel(db_name: str, asof_date: Optional[str] = None, _en
         "transactions_df": transactions_df,
         "raw_prices_cache": raw_cache,
         "processed_dates": processed_dates,
+        "price_levels_df": price_levels_df,
         "latest_processed_date": asof_date
     }
 
@@ -398,7 +402,9 @@ def run_dashboard():
             prices_gbp=prices_gbp,
             available_tickers=available_tickers,
             engine=active_engine,
-            raw_prices_cache=raw_prices_cache
+            raw_prices_cache=raw_prices_cache,
+            price_levels_df=data_bundle.get("price_levels_df"),
+            asof_date=selected_date
         )
 
     with tab6:

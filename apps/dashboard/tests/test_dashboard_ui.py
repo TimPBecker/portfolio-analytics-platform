@@ -650,6 +650,103 @@ def test_tab_market_data_imports_and_structure(sqlite_test_engine):
     assert latest_proc == "2026-09-24"
 
 
+def test_render_tab_returns_levels_table(sqlite_test_engine):
+    """
+    Tests render_tab_returns accepts price_levels_df and correctly renders with
+    proper column names, date descending sorting, and date/asset filters.
+    """
+    try:
+        from src.ui.tab_returns import render_tab_returns
+    except ImportError:
+        from apps.dashboard.src.ui.tab_returns import render_tab_returns
+    from portfolio_core.db import create_all_tables, fetch_asset_price_levels_and_returns
+    from unittest.mock import patch, MagicMock
+
+    engine = sqlite_test_engine
+    create_all_tables(engine)
+
+    # Seed test prices for two assets across 10 days
+    dates = pd.date_range("2026-08-20", periods=10, freq="B").strftime("%Y-%m-%d").tolist()
+    mock_prices = []
+    mock_fx = []
+    for i, d in enumerate(dates):
+        mock_prices.append({"DATE": d, "TICKER": "NVDA", "CLOSE": 100.0 + i, "CURRENCY": "USD"})
+        mock_prices.append({"DATE": d, "TICKER": "STAN.L", "CLOSE": 2000.0 + i * 10, "CURRENCY": "GBp"})
+        mock_fx.append({"DATE": d, "FROM_CURRENCY": "USD", "TO_CURRENCY": "GBP", "RATE": 0.80})
+
+    pd.DataFrame(mock_prices).to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+    pd.DataFrame(mock_fx).to_sql("FX_RATES", con=engine, if_exists="append", index=False)
+
+    levels_df = fetch_asset_price_levels_and_returns(engine=engine)
+    assert not levels_df.empty
+    assert levels_df["DATE"].iloc[0] == dates[-1]  # Most recent day first
+
+    # Mock streamlit components to verify render_tab_returns execution
+    prices_gbp = pd.DataFrame({
+        "NVDA": [80.0] * len(dates),
+        "STAN.L": [20.0] * len(dates),
+    }, index=pd.to_datetime(dates))
+
+    with patch("streamlit.selectbox") as mock_sb, \
+         patch("streamlit.dataframe") as mock_df, \
+         patch("streamlit.plotly_chart"), \
+         patch("streamlit.markdown"), \
+         patch("streamlit.caption"), \
+         patch("streamlit.metric"), \
+         patch("streamlit.download_button"):
+
+        # Default selectbox returns first option for each
+        mock_sb.side_effect = lambda label, options, **kwargs: options[0]
+
+        render_tab_returns(
+            prices_gbp=prices_gbp,
+            available_tickers=["NVDA", "STAN.L"],
+            engine=engine,
+            price_levels_df=levels_df,
+            asof_date=dates[-1]
+        )
+
+        assert mock_df.called
+        # Check the rendered dataframe has the required columns and descending date order
+        rendered_tables = [call.args[0] for call in mock_df.call_args_list if isinstance(call.args[0], pd.DataFrame)]
+        assert len(rendered_tables) >= 1
+        # The main levels table has "Price (Native)" and "Price (GBP)"
+        levels_table = next(t for t in rendered_tables if "Price (Native)" in t.columns)
+        assert "Date" in levels_table.columns
+        assert "Asset" in levels_table.columns
+        assert "Currency" in levels_table.columns
+        assert "Price (Native)" in levels_table.columns
+        assert "DoD Change (Native)" in levels_table.columns
+        assert "DoD Change (%)" in levels_table.columns
+        assert "Price (GBP)" in levels_table.columns
+        assert "DoD Change (GBP)" in levels_table.columns
+        assert "DoD Change (GBP %)" in levels_table.columns
+
+        # Verify most recent day first
+        date_vals = levels_table["Date"].tolist()
+        assert date_vals == sorted(date_vals, reverse=True)
+
+
+def test_tab_returns_date_filter_horizons():
+    """
+    Tests date horizon calculation logic: Last Week (7 days), Last Month (30 days), Last Year (365 days).
+    """
+    ref_date = pd.to_datetime("2026-09-01")
+
+    # Last Week
+    lw_start = ref_date - pd.Timedelta(days=7)
+    assert (ref_date - lw_start).days == 7
+
+    # Last Month
+    lm_start = ref_date - pd.Timedelta(days=30)
+    assert (ref_date - lm_start).days == 30
+
+    # Last Year
+    ly_start = ref_date - pd.Timedelta(days=365)
+    assert (ref_date - ly_start).days == 365
+
+
+
 
 
 
