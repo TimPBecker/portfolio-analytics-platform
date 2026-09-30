@@ -1021,7 +1021,32 @@ def fetch_and_store_ticker(
                 "TICKER": "CASH",
                 "CURRENCY": "GBP"
             })
-            cash_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            cash_rows = cash_rows.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+            cash_records = cash_rows.to_dict(orient="records")
+            if engine.dialect.name == "sqlite":
+                with engine.connect() as conn:
+                    conn.execute(
+                        text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                        cash_records
+                    )
+                    conn.commit()
+                cash_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            else:
+                upsert_sql = """
+                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `COMMENT`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`)
+                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :COMMENT, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY)
+                ON DUPLICATE KEY UPDATE
+                    `OPEN` = VALUES(`OPEN`),
+                    `HIGH` = VALUES(`HIGH`),
+                    `LOW` = VALUES(`LOW`),
+                    `CLOSE` = VALUES(`CLOSE`),
+                    `VOLUME` = VALUES(`VOLUME`),
+                    `COMMENT` = VALUES(`COMMENT`),
+                    `CURRENCY` = VALUES(`CURRENCY`);
+                """
+                with engine.connect() as conn:
+                    conn.execute(text(upsert_sql), cash_records)
+                    conn.commit()
             rows_written = len(cash_rows)
         else:
             rows_written = 0
@@ -1045,7 +1070,7 @@ def fetch_and_store_ticker(
                 {"ticker": ticker}
             ).scalars().all()
             if dates_res:
-                existing_dates = {str(d) for d in dates_res}
+                existing_dates = {str(d)[:10] for d in dates_res}
                 latest_date = max(existing_dates)
                 min_date = min(existing_dates)
     except Exception:
@@ -1111,6 +1136,7 @@ def fetch_and_store_ticker(
         hist = hist.reset_index()
         hist.columns = [col.replace(" ", "_").upper() for col in hist.columns]
         hist["DATE"] = pd.to_datetime(hist["DATE"]).dt.strftime("%Y-%m-%d")
+        hist = hist.drop_duplicates(subset=["DATE"], keep="last")
         hist["TICKER"] = ticker
         hist["CURRENCY"] = currency
 
@@ -1133,7 +1159,40 @@ def fetch_and_store_ticker(
         new_rows = new_rows[columns_to_keep]
 
         if not new_rows.empty:
-            new_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            new_rows = new_rows.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+            for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "DIVIDENDS", "STOCK_SPLITS"]:
+                if col not in new_rows.columns:
+                    new_rows[col] = None
+            new_rows["DIVIDENDS"] = new_rows["DIVIDENDS"].fillna(0.0)
+            new_rows["STOCK_SPLITS"] = new_rows["STOCK_SPLITS"].fillna(0.0)
+            new_rows = new_rows.where(pd.notnull(new_rows), None)
+            records = new_rows.to_dict(orient="records")
+
+            if engine.dialect.name == "sqlite":
+                with engine.connect() as conn:
+                    conn.execute(
+                        text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                        records
+                    )
+                    conn.commit()
+                new_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            else:
+                upsert_sql = """
+                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`)
+                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY)
+                ON DUPLICATE KEY UPDATE
+                    `OPEN` = VALUES(`OPEN`),
+                    `HIGH` = VALUES(`HIGH`),
+                    `LOW` = VALUES(`LOW`),
+                    `CLOSE` = VALUES(`CLOSE`),
+                    `VOLUME` = VALUES(`VOLUME`),
+                    `DIVIDENDS` = VALUES(`DIVIDENDS`),
+                    `STOCK_SPLITS` = VALUES(`STOCK_SPLITS`),
+                    `CURRENCY` = VALUES(`CURRENCY`);
+                """
+                with engine.connect() as conn:
+                    conn.execute(text(upsert_sql), records)
+                    conn.commit()
             rows_written = len(new_rows)
         else:
             rows_written = 0
@@ -1239,7 +1298,35 @@ def backfill_missing_prices(engine=None):
         ]
         columns_to_keep = [col for col in target_columns if col in backfill_df.columns]
         backfill_df = backfill_df[columns_to_keep]
-        backfill_df.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+        backfill_df = backfill_df.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+        backfill_df = backfill_df.where(pd.notnull(backfill_df), None)
+        records = backfill_df.to_dict(orient="records")
+        if engine.dialect.name == "sqlite":
+            with engine.connect() as conn:
+                conn.execute(
+                    text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                    records
+                )
+                conn.commit()
+            backfill_df.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+        else:
+            upsert_sql = """
+            INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`, `COMMENT`)
+            VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY, :COMMENT)
+            ON DUPLICATE KEY UPDATE
+                `OPEN` = VALUES(`OPEN`),
+                `HIGH` = VALUES(`HIGH`),
+                `LOW` = VALUES(`LOW`),
+                `CLOSE` = VALUES(`CLOSE`),
+                `VOLUME` = VALUES(`VOLUME`),
+                `DIVIDENDS` = VALUES(`DIVIDENDS`),
+                `STOCK_SPLITS` = VALUES(`STOCK_SPLITS`),
+                `CURRENCY` = VALUES(`CURRENCY`),
+                `COMMENT` = VALUES(`COMMENT`);
+            """
+            with engine.connect() as conn:
+                conn.execute(text(upsert_sql), records)
+                conn.commit()
         total_backfilled = len(backfill_df)
         summary_df = pd.DataFrame(summary_records)
     else:

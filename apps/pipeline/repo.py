@@ -4,7 +4,7 @@ Defines assets, jobs, and daily schedules, consuming database interaction
 functions from the standalone db module.
 """
 
-from typing import Optional
+from typing import Optional, List
 from dagster import (
     asset,
     Config,
@@ -152,6 +152,7 @@ class DatabaseResource(ConfigurableResource):
     host: Optional[str] = None
     port: Optional[int] = None
     database: Optional[str] = None
+    databases: Optional[List[str]] = None
     password: Optional[str] = None
 
     # SQLite fields (optional when type='mariadb')
