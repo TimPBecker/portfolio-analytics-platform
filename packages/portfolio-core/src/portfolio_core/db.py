@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import time
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, bindparam
 from sqlalchemy.engine import Engine, Connection
 
 
@@ -1060,13 +1060,58 @@ def fetch_and_store_ticker(
             "Total Value": 1.0 * shares
         }
     
+    # Handle synthetic cash benchmark: always £1.00 fixed GBP
+    if ticker.upper() == "CASH":
+        with engine.connect() as conn:
+            all_dates = conn.execute(
+                text("SELECT DISTINCT `DATE` FROM `ASSET_PRICES` WHERE `TICKER` != 'CASH'")
+            ).scalars().all()
+            if not all_dates:
+                all_dates = [pd.Timestamp.now().strftime("%Y-%m-%d")]
+            is_sqlite = engine.dialect.name == "sqlite"
+            for d in all_dates:
+                d_str = str(d)[:10]
+                if is_sqlite:
+                    conn.execute(
+                        text("DELETE FROM `ASSET_PRICES` WHERE `TICKER` = 'CASH' AND `DATE` = :d"),
+                        {"d": d_str}
+                    )
+                    conn.execute(
+                        text("""
+                            INSERT INTO `ASSET_PRICES` (`DATE`, `TICKER`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `CURRENCY`, `COMMENT`)
+                            VALUES (:d, 'CASH', 1.0, 1.0, 1.0, 1.0, 0, 0.0, 0.0, 'GBP', 'Fixed £1.00 Cash Benchmark')
+                        """),
+                        {"d": d_str}
+                    )
+                else:
+                    conn.execute(
+                        text("""
+                            INSERT INTO `ASSET_PRICES` (`DATE`, `TICKER`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `CURRENCY`, `COMMENT`)
+                            VALUES (:d, 'CASH', 1.0, 1.0, 1.0, 1.0, 0, 0.0, 0.0, 'GBP', 'Fixed £1.00 Cash Benchmark')
+                            ON DUPLICATE KEY UPDATE
+                                `OPEN` = 1.0, `HIGH` = 1.0, `LOW` = 1.0, `CLOSE` = 1.0,
+                                `VOLUME` = 0, `DIVIDENDS` = 0.0, `STOCK_SPLITS` = 0.0,
+                                `CURRENCY` = 'GBP', `COMMENT` = 'Fixed £1.00 Cash Benchmark'
+                        """),
+                        {"d": d_str}
+                    )
+            conn.commit()
+        return {
+            "Ticker": "CASH",
+            "Currency": "GBP",
+            "Rows Written": len(all_dates),
+            "Total Observations": len(all_dates),
+            "Latest Close": 1.0,
+            "Total Value": 1.0 * shares
+        }
+
     existing_dates = set()
     latest_date = None
     min_date = None
     try:
         with engine.connect() as conn:
             dates_res = conn.execute(
-                text("SELECT `DATE` FROM `ASSET_PRICES` WHERE `TICKER` = :ticker"),
+                text("SELECT `DATE` FROM `ASSET_PRICES` WHERE `TICKER` = :ticker AND (`COMMENT` IS NULL OR `COMMENT` NOT LIKE 'Backfilled%')"),
                 {"ticker": ticker}
             ).scalars().all()
             if dates_res:
@@ -1078,12 +1123,25 @@ def fetch_and_store_ticker(
 
     stock = yf.Ticker(ticker)
     
-    # If no data exists, or if existing history does not go back far enough (min_date > target_start):
-    # Fetch from target_start to backfill the full required historical window
-    if not existing_dates or (min_date and min_date > target_start):
+    if start_date:
+        fetch_start = str(start_date)[:10]
+    elif not existing_dates or (min_date and min_date > target_start):
         fetch_start = target_start
     elif latest_date:
-        fetch_start = latest_date
+        # Check if there are any placeholder backfilled dates that should be refreshed with real data
+        backfilled_dates = []
+        try:
+            with engine.connect() as conn:
+                backfilled_dates = conn.execute(
+                    text("SELECT `DATE` FROM `ASSET_PRICES` WHERE `TICKER` = :ticker AND `COMMENT` LIKE 'Backfilled%'"),
+                    {"ticker": ticker}
+                ).scalars().all()
+        except Exception:
+            pass
+        if backfilled_dates:
+            fetch_start = min(str(d)[:10] for d in backfilled_dates)
+        else:
+            fetch_start = latest_date
     else:
         fetch_start = target_start
 
@@ -1135,6 +1193,11 @@ def fetch_and_store_ticker(
 
         hist = hist.reset_index()
         hist.columns = [col.replace(" ", "_").upper() for col in hist.columns]
+        if "DATE" not in hist.columns:
+            if "INDEX" in hist.columns:
+                hist["DATE"] = hist["INDEX"]
+            elif "DATETIME" in hist.columns:
+                hist["DATE"] = hist["DATETIME"]
         hist["DATE"] = pd.to_datetime(hist["DATE"]).dt.strftime("%Y-%m-%d")
         hist = hist.drop_duplicates(subset=["DATE"], keep="last")
         hist["TICKER"] = ticker
@@ -1160,11 +1223,12 @@ def fetch_and_store_ticker(
 
         if not new_rows.empty:
             new_rows = new_rows.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
-            for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "DIVIDENDS", "STOCK_SPLITS"]:
+            for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "DIVIDENDS", "STOCK_SPLITS", "COMMENT"]:
                 if col not in new_rows.columns:
                     new_rows[col] = None
             new_rows["DIVIDENDS"] = new_rows["DIVIDENDS"].fillna(0.0)
             new_rows["STOCK_SPLITS"] = new_rows["STOCK_SPLITS"].fillna(0.0)
+            new_rows["COMMENT"] = None
             new_rows = new_rows.where(pd.notnull(new_rows), None)
             records = new_rows.to_dict(orient="records")
 
@@ -1178,8 +1242,8 @@ def fetch_and_store_ticker(
                 new_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
             else:
                 upsert_sql = """
-                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`)
-                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY)
+                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`, `COMMENT`)
+                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY, :COMMENT)
                 ON DUPLICATE KEY UPDATE
                     `OPEN` = VALUES(`OPEN`),
                     `HIGH` = VALUES(`HIGH`),
@@ -1188,7 +1252,8 @@ def fetch_and_store_ticker(
                     `VOLUME` = VALUES(`VOLUME`),
                     `DIVIDENDS` = VALUES(`DIVIDENDS`),
                     `STOCK_SPLITS` = VALUES(`STOCK_SPLITS`),
-                    `CURRENCY` = VALUES(`CURRENCY`);
+                    `CURRENCY` = VALUES(`CURRENCY`),
+                    `COMMENT` = VALUES(`COMMENT`);
                 """
                 with engine.connect() as conn:
                     conn.execute(text(upsert_sql), records)

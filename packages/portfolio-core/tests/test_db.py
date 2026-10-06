@@ -765,4 +765,78 @@ def test_fetch_asset_price_levels_and_returns(sqlite_test_engine):
     assert all(df_asof["DATE"] == "2026-08-20")
 
 
+def test_fetch_and_store_ticker_cash_synthetic(sqlite_test_engine):
+    """Verify that ticker CASH is handled synthetically as fixed £1.00 GBP without querying yfinance."""
+    from portfolio_core.db import create_all_tables, fetch_and_store_ticker
+    from sqlalchemy import text
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    with eng.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME)
+            VALUES ('2026-10-01', 'AAPL', 'USD', 150, 155, 149, 152, 1000)
+        """))
+
+    res = fetch_and_store_ticker("CASH", engine=eng)
+    assert res is not None
+    assert res["Ticker"] == "CASH"
+    assert res["Currency"] == "GBP"
+    assert res["Latest Close"] == 1.0
+
+    with eng.connect() as conn:
+        row = conn.execute(text("SELECT CLOSE, CURRENCY, COMMENT FROM ASSET_PRICES WHERE TICKER = 'CASH'")).mappings().first()
+        assert row is not None
+        assert float(row["CLOSE"]) == 1.0
+        assert row["CURRENCY"] == "GBP"
+        assert row["COMMENT"] == "Fixed £1.00 Cash Benchmark"
+
+
+def test_fetch_and_store_ticker_replaces_backfilled_placeholder(sqlite_test_engine, monkeypatch):
+    """Verify that genuine observations from yfinance replace placeholder backfilled rows."""
+    from portfolio_core.db import create_all_tables, fetch_and_store_ticker
+    from sqlalchemy import text
+
+    eng = sqlite_test_engine
+    create_all_tables(eng)
+
+    with eng.begin() as conn:
+        # Insert a backfilled placeholder row
+        conn.execute(text("""
+            INSERT INTO ASSET_PRICES (DATE, TICKER, CURRENCY, OPEN, HIGH, LOW, CLOSE, VOLUME, COMMENT)
+            VALUES ('2026-10-05', 'NVDA', 'USD', 230, 230, 230, 230, 0, 'Backfilled from previous day')
+        """))
+
+    class MockTicker:
+        def __init__(self, ticker):
+            self.ticker = ticker
+            self.history_metadata = {"currency": "USD"}
+            self.fast_info = type("obj", (), {"currency": "USD"})()
+            self.info = {"currency": "USD"}
+
+        def history(self, start=None, end=None, period=None):
+            return pd.DataFrame({
+                "Open": [235.0],
+                "High": [240.0],
+                "Low": [234.0],
+                "Close": [238.9],
+                "Volume": [10000],
+                "Dividends": [0.0],
+                "Stock Splits": [0.0]
+            }, index=pd.to_datetime(["2026-10-05"]))
+
+    monkeypatch.setattr("portfolio_core.db.yf.Ticker", MockTicker)
+
+    res = fetch_and_store_ticker("NVDA", start_date="2026-10-05", engine=eng)
+    assert res is not None
+    assert res["Rows Written"] == 1
+
+    with eng.connect() as conn:
+        row = conn.execute(text("SELECT CLOSE, COMMENT FROM ASSET_PRICES WHERE TICKER = 'NVDA' AND DATE = '2026-10-05'")).mappings().first()
+        assert row is not None
+        assert float(row["CLOSE"]) == 238.9
+        assert row["COMMENT"] is None
+
+
 
