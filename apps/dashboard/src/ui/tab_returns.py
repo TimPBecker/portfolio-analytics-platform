@@ -18,7 +18,7 @@ from portfolio_core.analytics.statistics import (
     generate_density_curves,
     compute_qq_plot_data
 )
-from portfolio_core.db import fetch_raw_asset_prices
+from portfolio_core.db import fetch_raw_asset_prices, fetch_asset_price_levels_and_returns
 from sqlalchemy.engine import Engine
 
 try:
@@ -31,7 +31,9 @@ def render_tab_returns(
     prices_gbp: pd.DataFrame,
     available_tickers: List[str],
     engine: Optional[Engine] = None,
-    raw_prices_cache: Optional[Dict[str, pd.DataFrame]] = None
+    raw_prices_cache: Optional[Dict[str, pd.DataFrame]] = None,
+    price_levels_df: Optional[pd.DataFrame] = None,
+    asof_date: Optional[str] = None
 ):
     """Renders the Price Levels, Returns and Distribution Histogram view."""
     st.markdown("### 📊 Asset Levels, Returns & Distribution Diagnostics")
@@ -298,7 +300,144 @@ def render_tab_returns(
     st.plotly_chart(fig_rets, use_container_width=True)
 
     # -------------------------------------------------------------------------
-    # 5. Return Distribution Histogram & Fitted Probability Densities
+    # 5. Asset Price Levels & Day-on-Day Returns Table
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("#### 📋 Asset Price Levels & Day-on-Day Returns")
+    st.caption("Inspect asset closing prices in their native currency, GBP converted prices, and day-on-day price and percentage changes.")
+
+    # Retrieve price levels dataframe (from pre-fetched cache or directly via DB)
+    if price_levels_df is not None and not price_levels_df.empty:
+        levels_base = price_levels_df.copy()
+    else:
+        levels_base = fetch_asset_price_levels_and_returns(asof_date=asof_date, engine=engine)
+
+    if not levels_base.empty:
+        levels_base["_DATE_DT"] = pd.to_datetime(levels_base["DATE"])
+        ref_max = levels_base["_DATE_DT"].max()
+        if asof_date:
+            try:
+                asof_dt = pd.to_datetime(str(asof_date)[:10])
+                if asof_dt <= ref_max:
+                    ref_max = asof_dt
+            except Exception:
+                pass
+
+        col_t_ctrl1, col_t_ctrl2 = st.columns([1.5, 1.5])
+        with col_t_ctrl1:
+            date_filter_options = ["Last Week", "Last Month", "Last Year", "All Available", "Custom Range"]
+            table_date_filter = st.selectbox(
+                "Filter Dates:",
+                options=date_filter_options,
+                index=0,  # Last Week is the default
+                key="tab_returns_table_date_filter",
+                help="Filter table records by time horizon. Defaults to Last Week."
+            )
+
+        with col_t_ctrl2:
+            asset_options = ["All Assets", f"Selected Asset ({selected_ticker})"] + [t for t in available_tickers if t != selected_ticker]
+            table_asset_filter = st.selectbox(
+                "Filter Asset:",
+                options=asset_options,
+                index=0,
+                key="tab_returns_table_asset_filter",
+                help="Display records across all assets or filter for a specific asset."
+            )
+
+        # Date filtering calculation
+        if table_date_filter == "Last Week":
+            filter_start = ref_max - pd.Timedelta(days=7)
+            filter_end = ref_max
+        elif table_date_filter == "Last Month":
+            filter_start = ref_max - pd.Timedelta(days=30)
+            filter_end = ref_max
+        elif table_date_filter == "Last Year":
+            filter_start = ref_max - pd.Timedelta(days=365)
+            filter_end = ref_max
+        elif table_date_filter == "All Available":
+            filter_start = levels_base["_DATE_DT"].min()
+            filter_end = ref_max
+        else:  # Custom Range
+            col_cd1, col_cd2 = st.columns(2)
+            with col_cd1:
+                custom_start = st.date_input("Start Date:", value=(ref_max - pd.Timedelta(days=7)).date(), key="tab_returns_custom_start")
+            with col_cd2:
+                custom_end = st.date_input("End Date:", value=ref_max.date(), key="tab_returns_custom_end")
+            filter_start = pd.to_datetime(custom_start)
+            filter_end = pd.to_datetime(custom_end)
+
+        # Slicing by date
+        df_sliced = levels_base[(levels_base["_DATE_DT"] >= filter_start) & (levels_base["_DATE_DT"] <= filter_end)].copy()
+
+        # Slicing by asset
+        if table_asset_filter == "All Assets":
+            pass
+        elif table_asset_filter.startswith("Selected Asset"):
+            df_sliced = df_sliced[df_sliced["TICKER"] == selected_ticker]
+        else:
+            df_sliced = df_sliced[df_sliced["TICKER"] == table_asset_filter]
+
+        # Order by most recent day first (DATE DESC, TICKER ASC)
+        df_sliced = df_sliced.sort_values(by=["_DATE_DT", "TICKER"], ascending=[False, True]).reset_index(drop=True)
+        df_sliced = df_sliced.drop(columns=["_DATE_DT"])
+
+        # Display summary row
+        t_m1, t_m2, t_m3, t_m4 = st.columns(4)
+        with t_m1:
+            st.metric("Date Range", f"{filter_start.strftime('%Y-%m-%d')} to {filter_end.strftime('%Y-%m-%d')}")
+        with t_m2:
+            st.metric("Total Records", f"{len(df_sliced):,} rows")
+        with t_m3:
+            st.metric("Assets Included", f"{df_sliced['TICKER'].nunique()} tickers" if not df_sliced.empty else "0 tickers")
+        with t_m4:
+            avg_dod = df_sliced["DOD_PCT_GBP"].mean() if not df_sliced.empty and not df_sliced["DOD_PCT_GBP"].dropna().empty else 0.0
+            st.metric("Average DoD Return (GBP)", f"{avg_dod:+.2f}%")
+
+        # Format and display table
+        display_table = df_sliced.rename(columns={
+            "DATE": "Date",
+            "TICKER": "Asset",
+            "CURRENCY": "Currency",
+            "CLOSE": "Price (Native)",
+            "DOD_CHANGE_NATIVE": "DoD Change (Native)",
+            "DOD_PCT_NATIVE": "DoD Change (%)",
+            "CLOSE_GBP": "Price (GBP)",
+            "DOD_CHANGE_GBP": "DoD Change (GBP)",
+            "DOD_PCT_GBP": "DoD Change (GBP %)"
+        })
+
+        st.dataframe(
+            display_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD", help="Pricing observation date"),
+                "Asset": st.column_config.TextColumn("Asset", help="Ticker symbol"),
+                "Currency": st.column_config.TextColumn("Currency", help="Native trading currency"),
+                "Price (Native)": st.column_config.NumberColumn("Price (Native)", format="%.2f", help="Closing price in native trading currency"),
+                "DoD Change (Native)": st.column_config.NumberColumn("DoD Change (Native)", format="%+.2f", help="Day-on-day nominal price change in native currency"),
+                "DoD Change (%)": st.column_config.NumberColumn("DoD Change (%)", format="%+.2f%%", help="Day-on-day percentage return in native currency"),
+                "Price (GBP)": st.column_config.NumberColumn("Price (GBP)", format="£%.2f", help="Closing price converted to GBP (£)"),
+                "DoD Change (GBP)": st.column_config.NumberColumn("DoD Change (GBP)", format="£%+.2f", help="Day-on-day nominal change in GBP (£)"),
+                "DoD Change (GBP %)": st.column_config.NumberColumn("DoD Change (GBP %)", format="%+.2f%%", help="Day-on-day percentage return in GBP (£)"),
+            }
+        )
+
+        csv_table = display_table.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export Table as CSV",
+            data=csv_table,
+            file_name=f"asset_price_levels_returns_{table_date_filter.lower().replace(' ', '_')}.csv",
+            mime="text/csv",
+            key="btn_download_levels_table"
+        )
+    else:
+        st.info("No price level records found.")
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # 6. Return Distribution Histogram & Fitted Probability Densities
     # -------------------------------------------------------------------------
     st.markdown("#### 📊 Empirical Return Distribution & Density Fitting")
     st.caption("Inspect the return frequency distribution with overlaid Kernel Density Estimation (KDE), Gaussian Normal fit, Student-t fit, and VaR cutoff thresholds.")
@@ -385,7 +524,7 @@ def render_tab_returns(
     st.plotly_chart(fig_density, use_container_width=True)
 
     # -------------------------------------------------------------------------
-    # 6. Quantile-Quantile (Q-Q) Diagnostics Plot & Extreme Dates Table
+    # 7. Quantile-Quantile (Q-Q) Diagnostics Plot & Extreme Dates Table
     # -------------------------------------------------------------------------
     col_qq1, col_qq2 = st.columns([1.3, 1.7])
 
@@ -443,7 +582,7 @@ def render_tab_returns(
         st.dataframe(pd.DataFrame(shock_records), use_container_width=True, hide_index=True)
 
     # -------------------------------------------------------------------------
-    # 7. Cross-Asset Return Correlation Matrix Heatmap
+    # 8. Cross-Asset Return Correlation Matrix Heatmap
     # -------------------------------------------------------------------------
     st.markdown("---")
     st.markdown("#### 🔥 Cross-Asset Daily Return Correlation Heatmap")

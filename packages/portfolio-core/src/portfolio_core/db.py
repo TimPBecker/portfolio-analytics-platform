@@ -15,7 +15,7 @@ import numpy as np
 import yfinance as yf
 import time
 from sqlalchemy import create_engine, text, bindparam
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, Connection
 
 
 def get_dev_database_name(base_name: Optional[str]) -> str:
@@ -273,6 +273,63 @@ def test_db_connection(engine: Optional[Engine] = None, database: Optional[str] 
         return True, "Connected successfully"
     except Exception as e:
         return False, str(e)
+
+
+PERMANENT_BENCHMARKS = {
+    "CASH": {
+        "benchmark_code": "CASH",
+        "name": "Cash",
+        "description": "Permanent Cash Benchmark (£1.00)",
+        "constituents_json": json.dumps({"CASH": 1.0}),
+    }
+}
+
+
+def _seed_permanent_benchmarks(conn: Connection, is_sqlite: bool) -> None:
+    """Helper to upsert permanent benchmarks into BENCHMARKS table if not present."""
+    for code, b_data in PERMANENT_BENCHMARKS.items():
+        existing = conn.execute(
+            text("SELECT COUNT(*) FROM `BENCHMARKS` WHERE `BENCHMARK_CODE` = :code"),
+            {"code": code}
+        ).scalar()
+        if not existing:
+            if is_sqlite:
+                sql = """
+                INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`)
+                VALUES (:code, :name, :desc, :c_json);
+                """
+            else:
+                sql = """
+                INSERT INTO `BENCHMARKS` (`BENCHMARK_CODE`, `NAME`, `DESCRIPTION`, `CONSTITUENTS_JSON`)
+                VALUES (:code, :name, :desc, :c_json)
+                ON DUPLICATE KEY UPDATE `BENCHMARK_CODE` = `BENCHMARK_CODE`;
+                """
+            conn.execute(
+                text(sql),
+                {
+                    "code": b_data["benchmark_code"],
+                    "name": b_data["name"],
+                    "desc": b_data["description"],
+                    "c_json": b_data["constituents_json"]
+                }
+            )
+            conn.commit()
+
+
+def ensure_permanent_benchmarks(engine_or_conn: Optional[Union[Engine, Connection]] = None) -> None:
+    """
+    Ensures that permanent benchmarks (specifically CASH with a fixed £1.00 valuation)
+    always exist in the BENCHMARKS table.
+    """
+    if engine_or_conn is None:
+        eng = get_engine()
+        with eng.connect() as conn:
+            _seed_permanent_benchmarks(conn, eng.dialect.name == "sqlite")
+    elif isinstance(engine_or_conn, Engine):
+        with engine_or_conn.connect() as conn:
+            _seed_permanent_benchmarks(conn, engine_or_conn.dialect.name == "sqlite")
+    else:
+        _seed_permanent_benchmarks(engine_or_conn, engine_or_conn.dialect.name == "sqlite")
 
 
 def create_all_tables(engine=None):
@@ -683,6 +740,12 @@ def create_all_tables(engine=None):
             if not bm_count:
                 default_benchmarks = [
                     {
+                        "code": "CASH",
+                        "name": "Cash",
+                        "desc": "Permanent Cash Benchmark (£1.00)",
+                        "constituents": json.dumps({"CASH": 1.0})
+                    },
+                    {
                         "code": "CSP1.L_100",
                         "name": "S&P 500 UCITS ETF",
                         "desc": "S&P 500 US Large Cap Equities",
@@ -713,6 +776,12 @@ def create_all_tables(engine=None):
                         bm
                     )
                 conn.commit()
+        except Exception:
+            pass
+
+        # Always guarantee that permanent benchmarks exist (such as CASH) even if BENCHMARKS was already populated
+        try:
+            _seed_permanent_benchmarks(conn, is_sqlite)
         except Exception:
             pass
 
@@ -903,6 +972,93 @@ def fetch_and_store_ticker(
                         target_start = min_tx_str
         except Exception:
             pass
+
+    ticker_clean = str(ticker).strip().upper()
+    if ticker_clean == "CASH":
+        target_end = str(end_date)[:10] if end_date else pd.Timestamp.now().strftime("%Y-%m-%d")
+        existing_dates = set()
+        try:
+            with engine.connect() as conn:
+                dates_res = conn.execute(
+                    text("SELECT `DATE` FROM `ASSET_PRICES` WHERE `TICKER` = 'CASH'")
+                ).scalars().all()
+                if dates_res:
+                    existing_dates = {str(d)[:10] for d in dates_res}
+        except Exception:
+            pass
+
+        db_dates = set()
+        try:
+            with engine.connect() as conn:
+                p_dates = conn.execute(
+                    text("SELECT DISTINCT `DATE` FROM `ASSET_PRICES` WHERE `DATE` >= :st AND `DATE` <= :et"),
+                    {"st": target_start, "et": target_end}
+                ).scalars().all()
+                db_dates.update(str(d)[:10] for d in p_dates if d)
+                tx_dates = conn.execute(
+                    text("SELECT DISTINCT `TRANSACTION_DATE` FROM `TRANSACTIONS` WHERE `TRANSACTION_DATE` >= :st AND `TRANSACTION_DATE` <= :et"),
+                    {"st": target_start, "et": target_end}
+                ).scalars().all()
+                db_dates.update(str(d)[:10] for d in tx_dates if d)
+        except Exception:
+            pass
+
+        b_dates = set(pd.date_range(start=target_start, end=target_end, freq="B").strftime("%Y-%m-%d"))
+        all_target_dates = sorted(list(db_dates.union(b_dates)))
+        missing_dates = [d for d in all_target_dates if d not in existing_dates]
+
+        if missing_dates:
+            cash_rows = pd.DataFrame({
+                "DATE": missing_dates,
+                "OPEN": 1.0,
+                "HIGH": 1.0,
+                "LOW": 1.0,
+                "CLOSE": 1.0,
+                "VOLUME": 0,
+                "COMMENT": "Fixed £1.00 Cash Benchmark",
+                "DIVIDENDS": 0.0,
+                "STOCK_SPLITS": 0.0,
+                "TICKER": "CASH",
+                "CURRENCY": "GBP"
+            })
+            cash_rows = cash_rows.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+            cash_records = cash_rows.to_dict(orient="records")
+            if engine.dialect.name == "sqlite":
+                with engine.connect() as conn:
+                    conn.execute(
+                        text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                        cash_records
+                    )
+                    conn.commit()
+                cash_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            else:
+                upsert_sql = """
+                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `COMMENT`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`)
+                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :COMMENT, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY)
+                ON DUPLICATE KEY UPDATE
+                    `OPEN` = VALUES(`OPEN`),
+                    `HIGH` = VALUES(`HIGH`),
+                    `LOW` = VALUES(`LOW`),
+                    `CLOSE` = VALUES(`CLOSE`),
+                    `VOLUME` = VALUES(`VOLUME`),
+                    `COMMENT` = VALUES(`COMMENT`),
+                    `CURRENCY` = VALUES(`CURRENCY`);
+                """
+                with engine.connect() as conn:
+                    conn.execute(text(upsert_sql), cash_records)
+                    conn.commit()
+            rows_written = len(cash_rows)
+        else:
+            rows_written = 0
+
+        return {
+            "Ticker": "CASH",
+            "Currency": "GBP",
+            "Rows Written": rows_written,
+            "Total Observations": len(existing_dates) + rows_written,
+            "Latest Close": 1.0,
+            "Total Value": 1.0 * shares
+        }
     
     # Handle synthetic cash benchmark: always £1.00 fixed GBP
     if ticker.upper() == "CASH":
@@ -959,7 +1115,7 @@ def fetch_and_store_ticker(
                 {"ticker": ticker}
             ).scalars().all()
             if dates_res:
-                existing_dates = {str(d) for d in dates_res}
+                existing_dates = {str(d)[:10] for d in dates_res}
                 latest_date = max(existing_dates)
                 min_date = min(existing_dates)
     except Exception:
@@ -1043,6 +1199,7 @@ def fetch_and_store_ticker(
             elif "DATETIME" in hist.columns:
                 hist["DATE"] = hist["DATETIME"]
         hist["DATE"] = pd.to_datetime(hist["DATE"]).dt.strftime("%Y-%m-%d")
+        hist = hist.drop_duplicates(subset=["DATE"], keep="last")
         hist["TICKER"] = ticker
         hist["CURRENCY"] = currency
 
@@ -1065,16 +1222,42 @@ def fetch_and_store_ticker(
         new_rows = new_rows[columns_to_keep]
 
         if not new_rows.empty:
-            dates_to_insert = [str(d)[:10] for d in new_rows["DATE"].unique()]
-            with engine.connect() as conn:
-                for i in range(0, len(dates_to_insert), 500):
-                    chunk = dates_to_insert[i:i + 500]
+            new_rows = new_rows.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+            for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "DIVIDENDS", "STOCK_SPLITS", "COMMENT"]:
+                if col not in new_rows.columns:
+                    new_rows[col] = None
+            new_rows["DIVIDENDS"] = new_rows["DIVIDENDS"].fillna(0.0)
+            new_rows["STOCK_SPLITS"] = new_rows["STOCK_SPLITS"].fillna(0.0)
+            new_rows["COMMENT"] = None
+            new_rows = new_rows.where(pd.notnull(new_rows), None)
+            records = new_rows.to_dict(orient="records")
+
+            if engine.dialect.name == "sqlite":
+                with engine.connect() as conn:
                     conn.execute(
-                        text("DELETE FROM `ASSET_PRICES` WHERE `TICKER` = :ticker AND `DATE` IN :dates").bindparams(bindparam("dates", expanding=True)),
-                        {"ticker": ticker, "dates": list(chunk)}
+                        text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                        records
                     )
-                conn.commit()
-            new_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+                    conn.commit()
+                new_rows.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+            else:
+                upsert_sql = """
+                INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`, `COMMENT`)
+                VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY, :COMMENT)
+                ON DUPLICATE KEY UPDATE
+                    `OPEN` = VALUES(`OPEN`),
+                    `HIGH` = VALUES(`HIGH`),
+                    `LOW` = VALUES(`LOW`),
+                    `CLOSE` = VALUES(`CLOSE`),
+                    `VOLUME` = VALUES(`VOLUME`),
+                    `DIVIDENDS` = VALUES(`DIVIDENDS`),
+                    `STOCK_SPLITS` = VALUES(`STOCK_SPLITS`),
+                    `CURRENCY` = VALUES(`CURRENCY`),
+                    `COMMENT` = VALUES(`COMMENT`);
+                """
+                with engine.connect() as conn:
+                    conn.execute(text(upsert_sql), records)
+                    conn.commit()
             rows_written = len(new_rows)
         else:
             rows_written = 0
@@ -1180,7 +1363,35 @@ def backfill_missing_prices(engine=None):
         ]
         columns_to_keep = [col for col in target_columns if col in backfill_df.columns]
         backfill_df = backfill_df[columns_to_keep]
-        backfill_df.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+        backfill_df = backfill_df.drop_duplicates(subset=["DATE", "TICKER"], keep="last")
+        backfill_df = backfill_df.where(pd.notnull(backfill_df), None)
+        records = backfill_df.to_dict(orient="records")
+        if engine.dialect.name == "sqlite":
+            with engine.connect() as conn:
+                conn.execute(
+                    text("DELETE FROM `ASSET_PRICES` WHERE `DATE` = :DATE AND `TICKER` = :TICKER"),
+                    records
+                )
+                conn.commit()
+            backfill_df.to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
+        else:
+            upsert_sql = """
+            INSERT INTO `ASSET_PRICES` (`DATE`, `OPEN`, `HIGH`, `LOW`, `CLOSE`, `VOLUME`, `DIVIDENDS`, `STOCK_SPLITS`, `TICKER`, `CURRENCY`, `COMMENT`)
+            VALUES (:DATE, :OPEN, :HIGH, :LOW, :CLOSE, :VOLUME, :DIVIDENDS, :STOCK_SPLITS, :TICKER, :CURRENCY, :COMMENT)
+            ON DUPLICATE KEY UPDATE
+                `OPEN` = VALUES(`OPEN`),
+                `HIGH` = VALUES(`HIGH`),
+                `LOW` = VALUES(`LOW`),
+                `CLOSE` = VALUES(`CLOSE`),
+                `VOLUME` = VALUES(`VOLUME`),
+                `DIVIDENDS` = VALUES(`DIVIDENDS`),
+                `STOCK_SPLITS` = VALUES(`STOCK_SPLITS`),
+                `CURRENCY` = VALUES(`CURRENCY`),
+                `COMMENT` = VALUES(`COMMENT`);
+            """
+            with engine.connect() as conn:
+                conn.execute(text(upsert_sql), records)
+                conn.commit()
         total_backfilled = len(backfill_df)
         summary_df = pd.DataFrame(summary_records)
     else:
@@ -1915,6 +2126,9 @@ def fetch_historical_prices_gbp(asof_date=None, engine=None) -> pd.DataFrame:
         columns="TICKER",
         values="CLOSE_GBP"
     ).sort_index().ffill().dropna(how="all")
+
+    if not price_matrix.empty:
+        price_matrix["CASH"] = 1.0
 
     return price_matrix
 
@@ -2938,6 +3152,9 @@ def fetch_historical_prices_gbp(
         values="CLOSE_GBP"
     ).sort_index().ffill().dropna(how="all")
 
+    if not price_matrix.empty:
+        price_matrix["CASH"] = 1.0
+
     price_matrix.index = pd.to_datetime(price_matrix.index)
     return price_matrix
 
@@ -2991,10 +3208,118 @@ def fetch_raw_asset_prices(
     with eng.connect() as conn:
         df = pd.read_sql(text(query), conn, params=params)
 
+    if df.empty and str(ticker_symbol).strip().upper() == "CASH":
+        try:
+            fetch_and_store_ticker("CASH", engine=eng)
+            with eng.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+        except Exception:
+            pass
+
     if not df.empty:
         df["DATE"] = pd.to_datetime(df["DATE"])
+        if str(ticker_symbol).strip().upper() == "CASH":
+            df["CLOSE"] = 1.0
+            df["CLOSE_GBP"] = 1.0
         df = df.sort_values("DATE").reset_index(drop=True)
     return df
+
+
+def fetch_asset_price_levels_and_returns(
+    tickers: Optional[List[str]] = None,
+    asof_date: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> pd.DataFrame:
+    """
+    Retrieves historical asset prices across assets in both native currency and GBP,
+    with day-on-day nominal price changes and percentage returns.
+
+    Parameters:
+        tickers: Optional list of tickers to filter by. If None, retrieves all available assets.
+        asof_date: Optional cutoff date (YYYY-MM-DD). If specified, filters records up to this date.
+        engine: Optional SQLAlchemy Engine.
+
+    Returns:
+        DataFrame with columns:
+        ['DATE', 'TICKER', 'CURRENCY', 'CLOSE', 'DOD_CHANGE_NATIVE', 'DOD_PCT_NATIVE',
+         'CLOSE_GBP', 'DOD_CHANGE_GBP', 'DOD_PCT_GBP']
+        sorted by DATE DESC, TICKER ASC (most recent day first).
+    """
+    eng = engine or get_engine()
+
+    price_where = []
+    price_params: Dict[str, Any] = {}
+
+    if asof_date:
+        price_where.append("DATE <= :asof")
+        price_params["asof"] = str(asof_date)[:10]
+
+    if tickers:
+        placeholders = [f":t_{i}" for i in range(len(tickers))]
+        price_where.append(f"TICKER IN ({', '.join(placeholders)})")
+        for i, t in enumerate(tickers):
+            price_params[f"t_{i}"] = t
+
+    where_clause = f"WHERE {' AND '.join(price_where)}" if price_where else ""
+    price_query = f"SELECT `DATE`, `TICKER`, `CLOSE`, `CURRENCY` FROM `ASSET_PRICES` {where_clause} ORDER BY `DATE` ASC"
+
+    fx_where = ["`TO_CURRENCY` = 'GBP'"]
+    fx_params: Dict[str, Any] = {}
+    if asof_date:
+        fx_where.append("`DATE` <= :asof")
+        fx_params["asof"] = str(asof_date)[:10]
+    fx_query = f"SELECT `DATE`, `FROM_CURRENCY`, `RATE` FROM `FX_RATES` WHERE {' AND '.join(fx_where)} ORDER BY `DATE` ASC"
+
+    with eng.connect() as conn:
+        prices_df = pd.read_sql(text(price_query), conn, params=price_params)
+        fx_df = pd.read_sql(text(fx_query), conn, params=fx_params)
+
+    if prices_df.empty:
+        return pd.DataFrame(columns=[
+            "DATE", "TICKER", "CURRENCY", "CLOSE",
+            "DOD_CHANGE_NATIVE", "DOD_PCT_NATIVE",
+            "CLOSE_GBP", "DOD_CHANGE_GBP", "DOD_PCT_GBP"
+        ])
+
+    prices_df["DATE"] = pd.to_datetime(prices_df["DATE"]).dt.strftime("%Y-%m-%d")
+    fx_df["DATE"] = pd.to_datetime(fx_df["DATE"]).dt.strftime("%Y-%m-%d")
+
+    all_dates = pd.DataFrame({"DATE": prices_df["DATE"].unique()})
+    gbp_fx = all_dates.copy()
+    gbp_fx["FROM_CURRENCY"] = "GBP"
+    gbp_fx["RATE"] = 1.0
+    all_fx = pd.concat([fx_df, gbp_fx], ignore_index=True).drop_duplicates(subset=["DATE", "FROM_CURRENCY"])
+
+    merged = pd.merge(prices_df, all_fx, left_on=["DATE", "CURRENCY"], right_on=["DATE", "FROM_CURRENCY"], how="left")
+    merged.loc[merged["CURRENCY"].isin(["GBp", "GBX", "GBp_PENCE", "gbp", "gbx"]) & merged["RATE"].isna(), "RATE"] = 0.01
+    merged.loc[(merged["CURRENCY"].isin(["GBP", "gbp"])) & merged["RATE"].isna(), "RATE"] = 1.0
+
+    is_pence = merged["CURRENCY"].isin(["GBp", "GBX", "GBp_PENCE", "gbp", "gbx"])
+    merged["CLOSE_GBP"] = np.where(
+        is_pence,
+        merged["CLOSE"].astype(float) / 100.0,
+        merged["CLOSE"].astype(float) * merged["RATE"].fillna(1.0).astype(float)
+    )
+
+    merged["_DATE_DT"] = pd.to_datetime(merged["DATE"])
+    merged = merged.sort_values(["TICKER", "_DATE_DT"]).reset_index(drop=True)
+
+    merged["DOD_CHANGE_NATIVE"] = merged.groupby("TICKER")["CLOSE"].diff()
+    merged["DOD_PCT_NATIVE"] = merged.groupby("TICKER")["CLOSE"].pct_change() * 100.0
+    merged["DOD_CHANGE_GBP"] = merged.groupby("TICKER")["CLOSE_GBP"].diff()
+    merged["DOD_PCT_GBP"] = merged.groupby("TICKER")["CLOSE_GBP"].pct_change() * 100.0
+
+    # Order descending by most recent date first
+    merged = merged.sort_values(["_DATE_DT", "TICKER"], ascending=[False, True]).reset_index(drop=True)
+    merged = merged.drop(columns=["_DATE_DT", "FROM_CURRENCY", "RATE"], errors="ignore")
+
+    return merged[[
+        "DATE", "TICKER", "CURRENCY", "CLOSE",
+        "DOD_CHANGE_NATIVE", "DOD_PCT_NATIVE",
+        "CLOSE_GBP", "DOD_CHANGE_GBP", "DOD_PCT_GBP"
+    ]]
+
+
 
 
 
@@ -3439,6 +3764,10 @@ def add_benchmark(
 
     final_name = str(name).strip() if name and str(name).strip() else fallback_name
     final_code = str(benchmark_code).strip().upper() if benchmark_code and str(benchmark_code).strip() else fallback_name
+
+    if final_code == "CASH" and list(c_map.keys()) != ["CASH"]:
+        raise ValueError("The 'CASH' benchmark is permanent and must have 'CASH' as its constituent.")
+
     desc = str(description).strip() if description else f"Linear Combination ({', '.join([f'{t}: {w*100:.1f}%' for t, w in c_map.items()])})"
     c_json = json.dumps(c_map)
 
@@ -3497,9 +3826,12 @@ def delete_benchmark(benchmark_code: str, engine: Optional[Engine] = None) -> bo
     Removes a benchmark from the BENCHMARKS table.
     Dependent tables (BENCHMARK_TRANSACTIONS, BENCHMARK_VALUES) are updated automatically
     through database foreign key constraints.
+    The permanent CASH benchmark cannot be deleted.
     """
     eng = engine or get_engine()
     code_clean = str(benchmark_code).strip().upper()
+    if code_clean == "CASH":
+        raise ValueError("The 'CASH' benchmark is permanent and cannot be deleted.")
     with eng.connect() as conn:
         conn.execute(text("DELETE FROM `BENCHMARKS` WHERE `BENCHMARK_CODE` = :b"), {"b": code_clean})
         conn.commit()
@@ -3580,26 +3912,29 @@ def generate_and_store_benchmark_transactions(
                 c_ticker = str(c_ticker).strip().upper()
                 c_weight = float(c_weight)
 
-                if c_ticker not in price_matrix.columns:
-                    try:
-                        fetch_and_store_ticker(c_ticker, engine=eng)
-                        if asof_date:
-                            delete_data_after_date(asof_date, engine=eng)
-                        prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=eng)
-                        price_matrix = prices_gbp.ffill().bfill()
-                        price_dates = sorted(price_matrix.index.tolist())
-                    except Exception:
-                        pass
-
-                if c_ticker in price_matrix.columns:
-                    if tx_date in price_matrix.index:
-                        c_px = float(price_matrix.loc[tx_date, c_ticker])
-                    else:
-                        prior_dates = [d for d in price_dates if str(d)[:10] <= tx_date]
-                        ref_date = prior_dates[-1] if prior_dates else price_dates[0]
-                        c_px = float(price_matrix.loc[ref_date, c_ticker])
-                else:
+                if c_ticker == "CASH":
                     c_px = 1.0
+                else:
+                    if c_ticker not in price_matrix.columns:
+                        try:
+                            fetch_and_store_ticker(c_ticker, engine=eng)
+                            if asof_date:
+                                delete_data_after_date(asof_date, engine=eng)
+                            prices_gbp = fetch_historical_prices_gbp(asof_date=asof_date, engine=eng)
+                            price_matrix = prices_gbp.ffill().bfill()
+                            price_dates = sorted(price_matrix.index.tolist())
+                        except Exception:
+                            pass
+
+                    if c_ticker in price_matrix.columns:
+                        if tx_date in price_matrix.index:
+                            c_px = float(price_matrix.loc[tx_date, c_ticker])
+                        else:
+                            prior_dates = [d for d in price_dates if str(d)[:10] <= tx_date]
+                            ref_date = prior_dates[-1] if prior_dates else price_dates[0]
+                            c_px = float(price_matrix.loc[ref_date, c_ticker])
+                    else:
+                        c_px = 1.0
 
                 c_gbp_val = round(total_tx_gbp * c_weight, 2)
                 c_qty = (c_gbp_val / c_px) if c_px > 0 else 0.0
@@ -3734,23 +4069,30 @@ def calculate_and_store_daily_benchmark_values(
         for c_ticker in c_map.keys():
             c_ticker = str(c_ticker).strip().upper()
             c_tx = bm_sub[bm_sub["TICKER"] == c_ticker]
-            if c_tx.empty or c_ticker not in price_matrix.columns:
+            if c_tx.empty:
                 continue
 
             tx_pivot = c_tx.groupby("TRANSACTION_DATE")["QUANTITY"].sum()
             shares_series = tx_pivot.reindex(full_date_range).fillna(0.0).cumsum()
-            px_series = price_matrix[c_ticker].reindex(full_date_range).ffill().bfill()
+
+            if c_ticker == "CASH":
+                px_series = pd.Series(1.0, index=full_date_range)
+            else:
+                if c_ticker not in price_matrix.columns:
+                    continue
+                px_series = price_matrix[c_ticker].reindex(full_date_range).ffill().bfill()
 
             c_val_series = shares_series * px_series
             bm_daily_stocks = bm_daily_stocks.add(c_val_series, fill_value=0.0)
 
-            # Check dividend payouts for held constituent shares
-            for dt_str in full_date_range:
-                div_px = div_gbp_map.get((dt_str, c_ticker), 0.0)
-                if div_px > 0:
-                    held_sh = float(shares_series.get(dt_str, 0.0))
-                    if held_sh > 0:
-                        bm_daily_cashflow[dt_str] += held_sh * div_px
+            # Check dividend payouts for held constituent shares (CASH does not pay equity dividends)
+            if c_ticker != "CASH":
+                for dt_str in full_date_range:
+                    div_px = div_gbp_map.get((dt_str, c_ticker), 0.0)
+                    if div_px > 0:
+                        held_sh = float(shares_series.get(dt_str, 0.0))
+                        if held_sh > 0:
+                            bm_daily_cashflow[dt_str] += held_sh * div_px
 
         # Cumulative cash account balance for the benchmark shadow portfolio
         bm_cum_cash = bm_daily_cashflow.cumsum()

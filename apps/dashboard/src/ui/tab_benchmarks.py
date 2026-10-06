@@ -269,7 +269,10 @@ def render_tab_benchmarks(
                     bm_cagr = (((bm_latest_tot / bm_init_val) ** (252.0 / max(len(bm_sub), 1))) - 1.0) * 100.0 if bm_init_val > 0 else 0.0
                     bm_sharpe = (bm_cagr / bm_ann_vol) if bm_ann_vol > 0 else 0.0
 
-                    bm_label = f"🎯 {bm_code} ({bm_name_map.get(bm_code, bm_code)})"
+                    if str(bm_code).strip().upper() == "CASH":
+                        bm_label = f"💷 {bm_code} ({bm_name_map.get(bm_code, bm_code)}) [Fixed £1.00]"
+                    else:
+                        bm_label = f"🎯 {bm_code} ({bm_name_map.get(bm_code, bm_code)})"
                     scorecard_rows.append({
                         "Asset / Benchmark": bm_label,
                         "Total Value (£)": f"£{bm_latest_tot:,.2f}",
@@ -522,24 +525,28 @@ def render_tab_benchmarks(
 
                 st.markdown("---")
                 st.markdown("##### 🗑️ Remove Benchmark")
-                bm_to_del = st.selectbox(
-                    "Select Benchmark to Remove:",
-                    options=bm_df["BENCHMARK_CODE"].tolist(),
-                    index=None,
-                    format_func=lambda b: f"{b} — {bm_name_map.get(b, b)}",
-                    placeholder="Select a benchmark to remove from database..."
-                )
-                if bm_to_del:
-                    del_name = bm_name_map.get(bm_to_del, bm_to_del)
-                    st.caption(f"Selected: **{bm_to_del}** ({del_name})")
-                    if st.button(f"🗑️ Delete Benchmark '{bm_to_del}'", type="secondary", use_container_width=True):
-                        try:
-                            delete_benchmark(bm_to_del, engine=engine)
-                            st.success(f"✅ Deleted benchmark **{bm_to_del}** from the database.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(f"Failed to delete benchmark: {ex}")
+                deletable_bms = [b for b in bm_df["BENCHMARK_CODE"].tolist() if str(b).strip().upper() != "CASH"]
+                if deletable_bms:
+                    bm_to_del = st.selectbox(
+                        "Select Benchmark to Remove:",
+                        options=deletable_bms,
+                        index=None,
+                        format_func=lambda b: f"{b} — {bm_name_map.get(b, b)}",
+                        placeholder="Select a benchmark to remove from database..."
+                    )
+                    if bm_to_del:
+                        del_name = bm_name_map.get(bm_to_del, bm_to_del)
+                        st.caption(f"Selected: **{bm_to_del}** ({del_name})")
+                        if st.button(f"🗑️ Delete Benchmark '{bm_to_del}'", type="secondary", use_container_width=True):
+                            try:
+                                delete_benchmark(bm_to_del, engine=engine)
+                                st.success(f"✅ Deleted benchmark **{bm_to_del}** from the database.")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as ex:
+                                st.error(f"Failed to delete benchmark: {ex}")
+                else:
+                    st.info("ℹ️ No removable benchmarks. The permanent **CASH** benchmark cannot be deleted.")
             else:
                 st.info("No benchmark tickers registered.")
 
