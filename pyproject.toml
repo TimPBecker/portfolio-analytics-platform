@@ -16,3 +16,12 @@ testpaths = [
     "apps/dashboard/tests"
 ]
 python_files = ["test_*.py"]
+filterwarnings = [
+    "ignore::DeprecationWarning:yfinance.*",
+    "ignore:The inplace keyword in DataFrame.*:DeprecationWarning",
+    "ignore::DeprecationWarning:anyio.*",
+    "ignore::pytest.PytestRemovedIn10Warning",
+    "ignore::DeprecationWarning:dagster.*",
+    "ignore::DeprecationWarning:dask.*",
+    "ignore::DeprecationWarning:distributed.*",
+]
