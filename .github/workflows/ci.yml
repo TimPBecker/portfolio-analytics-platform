@@ -22,6 +22,7 @@ jobs:
       TEST_MODE: "1"
       PYTHONPATH: .
       DB_PASSWORD: "test_password_ci"
+      NODE_OPTIONS: "--no-deprecation"
 
     strategy:
       fail-fast: false
