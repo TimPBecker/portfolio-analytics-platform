@@ -4882,5 +4882,402 @@ def refresh_all_market_data(
     }
 
 
+def fetch_live_fx_rate_to_gbp(
+    from_currency: str,
+    engine: Optional[Engine] = None
+) -> Tuple[float, str]:
+    """
+    Determines the live foreign exchange rate from Yahoo Finance to convert from_currency to GBP,
+    falling back to the latest database FX rate if Yahoo Finance is unreachable.
+    - GBP -> 1.0
+    - GBp/GBX/GBp_PENCE -> 0.01 (pence to pounds)
+    - Foreign currencies (USD, EUR, etc.) -> queries live Yahoo Finance FX pair (e.g. USDGBP=X).
+    """
+    fc_raw = str(from_currency or "GBP").strip()
+    if fc_raw in ("GBp", "GBX", "GBp_PENCE") or fc_raw.lower() in ("gbp_pence", "pence"):
+        return 0.01, "GBp/GBP (0.01 pence to £)"
+
+    fc_clean = fc_raw.upper()
+    if fc_clean == "GBP":
+        return 1.0, "GBP/GBP (1.00)"
+
+    # 1. Query Yahoo Finance for live FX rate (intraday 1m or latest 5d)
+    pair_ticker = f"{fc_clean}GBP=X"
+    try:
+        stock = yf.Ticker(pair_ticker)
+        hist = pd.DataFrame()
+        for kwargs in ({"period": "1d", "interval": "1m"}, {"period": "5d"}):
+            try:
+                hist = stock.history(**kwargs)
+                if hist is not None and not hist.empty:
+                    break
+            except Exception:
+                continue
+        if hist is not None and not hist.empty:
+            close_col = "Close" if "Close" in hist.columns else "CLOSE"
+            valid_closes = hist[close_col].dropna()
+            if not valid_closes.empty:
+                rate_val = float(valid_closes.iloc[-1])
+                if rate_val > 0:
+                    return rate_val, f"{fc_clean}/GBP live from Yahoo Finance ({rate_val:,.4f})"
+    except Exception:
+        pass
+
+    # 2. Fallback to database or historical FX lookup
+    return fetch_fx_rate_to_gbp(from_currency=fc_raw, target_date=date.today(), engine=engine)
 
 
+def query_yahoo_live_price(
+    ticker: str,
+    fallback_currency: Optional[str] = None,
+    engine: Optional[Engine] = None
+) -> Dict[str, Any]:
+    """
+    Queries Yahoo Finance for the latest live/intraday price of a given ticker,
+    determines its native currency and live FX conversion rate to GBP, and returns
+    the live price in both native currency and GBP alongside the query timestamp.
+    """
+    query_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    clean_ticker = str(ticker).strip().upper()
+    if not clean_ticker:
+        return {"status": "error", "message": "No ticker provided", "query_timestamp": query_ts}
+
+    if clean_ticker == "CASH":
+        return {
+            "ticker": "CASH",
+            "live_price": 1.0,
+            "currency": "GBP",
+            "fx_rate_to_gbp": 1.0,
+            "fx_description": "GBP/GBP (1.00)",
+            "live_price_gbp": 1.0,
+            "quote_timestamp": query_ts,
+            "query_timestamp": query_ts,
+            "status": "success"
+        }
+
+    stock = yf.Ticker(clean_ticker)
+    hist = pd.DataFrame()
+
+    # Try 1-minute intraday bars first, then 5-day history, then 1-month history
+    for hist_kwargs in (
+        {"period": "1d", "interval": "1m"},
+        {"period": "5d"},
+        {"period": "1mo"},
+    ):
+        try:
+            hist = stock.history(**hist_kwargs)
+            if hist is not None and not hist.empty:
+                close_col = "Close" if "Close" in hist.columns else ("CLOSE" if "CLOSE" in hist.columns else None)
+                if close_col and not hist[close_col].dropna().empty:
+                    break
+        except Exception:
+            continue
+
+    live_price: Optional[float] = None
+    quote_ts_str = query_ts
+
+    if hist is not None and not hist.empty:
+        close_col = "Close" if "Close" in hist.columns else ("CLOSE" if "CLOSE" in hist.columns else None)
+        if close_col:
+            valid_hist = hist.dropna(subset=[close_col])
+            if not valid_hist.empty:
+                live_price = float(valid_hist[close_col].iloc[-1])
+                try:
+                    last_idx = valid_hist.index[-1]
+                    quote_ts_str = pd.to_datetime(last_idx).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    quote_ts_str = query_ts
+
+    # Fallback to fast_info if history returned empty
+    if live_price is None or live_price <= 0:
+        try:
+            if hasattr(stock, "fast_info") and stock.fast_info is not None:
+                fi_px = getattr(stock.fast_info, "last_price", None)
+                if fi_px is None and hasattr(stock.fast_info, "get"):
+                    fi_px = stock.fast_info.get("lastPrice") or stock.fast_info.get("last_price")
+                if fi_px is not None and float(fi_px) > 0:
+                    live_price = float(fi_px)
+        except Exception:
+            pass
+
+    if live_price is None or live_price <= 0:
+        return {
+            "status": "error",
+            "ticker": clean_ticker,
+            "message": f"Could not retrieve live price from Yahoo Finance for '{clean_ticker}'.",
+            "query_timestamp": query_ts
+        }
+
+    # Resolve currency from Yahoo metadata or fallback_currency from database
+    currency = None
+    try:
+        if hasattr(stock, "history_metadata") and stock.history_metadata:
+            currency = stock.history_metadata.get("currency")
+        if not currency and hasattr(stock, "fast_info") and stock.fast_info is not None:
+            currency = getattr(stock.fast_info, "currency", None)
+            if not currency and hasattr(stock.fast_info, "get"):
+                currency = stock.fast_info.get("currency")
+        if not currency and hasattr(stock, "info") and stock.info:
+            currency = stock.info.get("currency")
+    except Exception:
+        pass
+
+    if not currency:
+        currency = fallback_currency or ("GBp" if clean_ticker.endswith(".L") else "USD")
+
+    fx_rate, fx_desc = fetch_live_fx_rate_to_gbp(from_currency=currency, engine=engine)
+    live_price_gbp = live_price * fx_rate
+
+    return {
+        "ticker": clean_ticker,
+        "live_price": live_price,
+        "currency": currency,
+        "fx_rate_to_gbp": fx_rate,
+        "fx_description": fx_desc,
+        "live_price_gbp": live_price_gbp,
+        "quote_timestamp": quote_ts_str,
+        "query_timestamp": query_ts,
+        "status": "success"
+    }
+
+
+def fetch_latest_db_prices_for_tickers(
+    tickers: Optional[List[str]] = None,
+    engine: Optional[Engine] = None,
+    prices_gbp: Optional[pd.DataFrame] = None
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Retrieves the last recorded price and GBP price in the database for each ticker.
+    Uses ASSET_PRICES and FX_RATES when available, with fallback to prices_gbp DataFrame.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    target_set = {str(t).strip().upper() for t in tickers} if tickers else None
+
+    if engine is not None:
+        try:
+            full_gbp_df = fetch_historical_prices_gbp(engine=engine)
+            with engine.connect() as conn:
+                raw_df = pd.read_sql(
+                    text("SELECT `DATE`, `TICKER`, `CLOSE`, `CURRENCY` FROM `ASSET_PRICES` ORDER BY `DATE` ASC"),
+                    conn
+                )
+            if not raw_df.empty:
+                raw_df["TICKER_UPPER"] = raw_df["TICKER"].astype(str).str.strip().str.upper()
+                if target_set is not None:
+                    raw_df = raw_df[raw_df["TICKER_UPPER"].isin(target_set)]
+                latest_raw = raw_df.drop_duplicates(subset=["TICKER_UPPER"], keep="last")
+                for _, row in latest_raw.iterrows():
+                    t_sym = str(row["TICKER"]).strip().upper()
+                    d_str = pd.to_datetime(row["DATE"]).strftime("%Y-%m-%d")
+                    close_native = float(row["CLOSE"]) if row["CLOSE"] is not None else 0.0
+                    curr = str(row["CURRENCY"] or "GBP").strip()
+                    if not full_gbp_df.empty and t_sym in full_gbp_df.columns:
+                        s_gbp = full_gbp_df[t_sym].dropna()
+                        px_gbp = float(s_gbp.iloc[-1]) if not s_gbp.empty else close_native
+                        d_str = pd.to_datetime(s_gbp.index[-1]).strftime("%Y-%m-%d") if not s_gbp.empty else d_str
+                    else:
+                        fx_r, _ = fetch_fx_rate_to_gbp(curr, d_str, engine=engine)
+                        px_gbp = close_native * fx_r
+                    result[t_sym] = {
+                        "ticker": t_sym,
+                        "prev_date": d_str,
+                        "prev_price_native": close_native,
+                        "currency": curr,
+                        "prev_price_gbp": px_gbp,
+                    }
+        except Exception:
+            pass
+
+    # Fallback / supplement from prices_gbp DataFrame if provided
+    if prices_gbp is not None and not prices_gbp.empty:
+        for col in prices_gbp.columns:
+            t_sym = str(col).strip().upper()
+            if target_set is not None and t_sym not in target_set:
+                continue
+            if t_sym not in result:
+                s = prices_gbp[col].dropna()
+                if not s.empty:
+                    last_px_gbp = float(s.iloc[-1])
+                    last_dt_str = pd.to_datetime(s.index[-1]).strftime("%Y-%m-%d")
+                    result[t_sym] = {
+                        "ticker": t_sym,
+                        "prev_date": last_dt_str,
+                        "prev_price_native": last_px_gbp,
+                        "currency": "GBP",
+                        "prev_price_gbp": last_px_gbp,
+                    }
+
+    return result
+
+
+def fetch_live_positions_valuation(
+    positions: Optional[Dict[str, float]] = None,
+    prices_gbp: Optional[pd.DataFrame] = None,
+    engine: Optional[Engine] = None
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Queries live prices from Yahoo Finance for all current portfolio positions and compares
+    each position's current live valuation in GBP against its last recorded end value in the database.
+
+    Returns:
+        Tuple of (positions_df, summary_meta):
+        - positions_df: DataFrame with columns:
+            ['TICKER', 'SHARES', 'CURRENCY', 'LIVE_PRICE_NATIVE', 'LIVE_PRICE_GBP',
+             'PREV_PRICE_GBP', 'PREV_DATE', 'CURRENT_VALUE_GBP', 'PREV_VALUE_GBP',
+             'CHANGE_GBP', 'CHANGE_PCT', 'WEIGHT_PCT', 'QUERY_TIMESTAMP', 'STATUS']
+        - summary_meta: Dict with portfolio-level totals and last query timestamp:
+            {
+                'query_timestamp': 'YYYY-MM-DD HH:MM:SS',
+                'total_current_value_gbp': float,
+                'total_prev_value_gbp': float,
+                'total_change_gbp': float,
+                'total_change_pct': float,
+                'prev_db_date': str,
+                'positions_count': int,
+                'live_success_count': int,
+                'refresh_interval_seconds': 60
+            }
+    """
+    import concurrent.futures
+
+    query_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Resolve current active positions (shares > 0)
+    active_positions: Dict[str, float] = {}
+    if engine is not None:
+        try:
+            db_pos = fetch_portfolio_positions(engine=engine)
+            if db_pos:
+                active_positions = {str(t).strip().upper(): float(sh) for t, sh in db_pos.items() if float(sh) > 0}
+        except Exception:
+            pass
+
+    if not active_positions and positions:
+        active_positions = {str(t).strip().upper(): float(sh) for t, sh in positions.items() if float(sh) > 0}
+
+    empty_cols = [
+        "TICKER", "SHARES", "CURRENCY", "LIVE_PRICE_NATIVE", "LIVE_PRICE_GBP",
+        "PREV_PRICE_GBP", "PREV_DATE", "CURRENT_VALUE_GBP", "PREV_VALUE_GBP",
+        "CHANGE_GBP", "CHANGE_PCT", "WEIGHT_PCT", "QUERY_TIMESTAMP", "STATUS"
+    ]
+    if not active_positions:
+        return pd.DataFrame(columns=empty_cols), {
+            "query_timestamp": query_ts,
+            "total_current_value_gbp": 0.0,
+            "total_prev_value_gbp": 0.0,
+            "total_change_gbp": 0.0,
+            "total_change_pct": 0.0,
+            "prev_db_date": "N/A",
+            "positions_count": 0,
+            "live_success_count": 0,
+            "refresh_interval_seconds": 60,
+        }
+
+    tickers_list = sorted(active_positions.keys())
+
+    # 2. Fetch last price & date in database for all current positions
+    db_latest_map = fetch_latest_db_prices_for_tickers(
+        tickers=tickers_list,
+        engine=engine,
+        prices_gbp=prices_gbp
+    )
+
+    # 3. Query Yahoo Finance concurrently for all current positions
+    live_quotes: Dict[str, Dict[str, Any]] = {}
+    max_workers = min(8, max(1, len(tickers_list)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {
+            executor.submit(
+                query_yahoo_live_price,
+                ticker=t,
+                fallback_currency=db_latest_map.get(t, {}).get("currency"),
+                engine=engine
+            ): t
+            for t in tickers_list
+        }
+        for future in concurrent.futures.as_completed(future_to_ticker):
+            t_sym = future_to_ticker[future]
+            try:
+                live_quotes[t_sym] = future.result()
+            except Exception as exc:
+                live_quotes[t_sym] = {"status": "error", "ticker": t_sym, "message": str(exc)}
+
+    # 4. Assemble position-level comparison rows
+    rows = []
+    live_success_count = 0
+    prev_dates_seen = []
+
+    for t in tickers_list:
+        shares = float(active_positions[t])
+        db_info = db_latest_map.get(t, {})
+        prev_px_gbp = float(db_info.get("prev_price_gbp", 0.0))
+        prev_px_native = float(db_info.get("prev_price_native", prev_px_gbp))
+        prev_date = str(db_info.get("prev_date", "N/A"))
+        db_curr = str(db_info.get("currency", "GBP"))
+        if prev_date and prev_date != "N/A":
+            prev_dates_seen.append(prev_date)
+
+        q = live_quotes.get(t, {})
+        if q.get("status") == "success" and q.get("live_price_gbp", 0.0) > 0:
+            live_px_native = float(q["live_price"])
+            live_px_gbp = float(q["live_price_gbp"])
+            curr = str(q.get("currency") or db_curr)
+            status_label = "Live (Yahoo)"
+            live_success_count += 1
+        else:
+            # Graceful fallback to last DB price if Yahoo is temporarily unreachable
+            live_px_native = prev_px_native
+            live_px_gbp = prev_px_gbp
+            curr = db_curr
+            status_label = "DB Fallback"
+
+        # If DB had no prior price for this ticker, anchor previous price to live price
+        if prev_px_gbp <= 0 and live_px_gbp > 0:
+            prev_px_gbp = live_px_gbp
+
+        curr_val_gbp = shares * live_px_gbp
+        prev_val_gbp = shares * prev_px_gbp
+        change_gbp = curr_val_gbp - prev_val_gbp
+        change_pct = ((curr_val_gbp / prev_val_gbp) - 1.0) * 100.0 if prev_val_gbp > 0 else 0.0
+
+        rows.append({
+            "TICKER": t,
+            "SHARES": shares,
+            "CURRENCY": curr,
+            "LIVE_PRICE_NATIVE": live_px_native,
+            "LIVE_PRICE_GBP": live_px_gbp,
+            "PREV_PRICE_GBP": prev_px_gbp,
+            "PREV_DATE": prev_date,
+            "CURRENT_VALUE_GBP": curr_val_gbp,
+            "PREV_VALUE_GBP": prev_val_gbp,
+            "CHANGE_GBP": change_gbp,
+            "CHANGE_PCT": change_pct,
+            "WEIGHT_PCT": 0.0,
+            "QUERY_TIMESTAMP": query_ts,
+            "STATUS": status_label,
+        })
+
+    pos_df = pd.DataFrame(rows)
+    total_curr_val = float(pos_df["CURRENT_VALUE_GBP"].sum()) if not pos_df.empty else 0.0
+    total_prev_val = float(pos_df["PREV_VALUE_GBP"].sum()) if not pos_df.empty else 0.0
+    total_chg_gbp = total_curr_val - total_prev_val
+    total_chg_pct = ((total_curr_val / total_prev_val) - 1.0) * 100.0 if total_prev_val > 0 else 0.0
+
+    if not pos_df.empty and total_curr_val > 0:
+        pos_df["WEIGHT_PCT"] = (pos_df["CURRENT_VALUE_GBP"] / total_curr_val) * 100.0
+        pos_df = pos_df.sort_values("CURRENT_VALUE_GBP", ascending=False).reset_index(drop=True)
+
+    latest_db_date = max(prev_dates_seen) if prev_dates_seen else "N/A"
+
+    summary_meta = {
+        "query_timestamp": query_ts,
+        "total_current_value_gbp": total_curr_val,
+        "total_prev_value_gbp": total_prev_val,
+        "total_change_gbp": total_chg_gbp,
+        "total_change_pct": total_chg_pct,
+        "prev_db_date": latest_db_date,
+        "positions_count": len(pos_df),
+        "live_success_count": live_success_count,
+        "refresh_interval_seconds": 60,
+    }
+    return pos_df, summary_meta

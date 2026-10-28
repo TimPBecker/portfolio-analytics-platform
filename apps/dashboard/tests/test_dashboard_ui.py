@@ -751,10 +751,119 @@ def test_tab_returns_date_filter_horizons():
     assert (ref_date - ly_start).days == 365
 
 
+def test_live_positions_valuation_and_ui(sqlite_test_engine):
+    """
+    Tests:
+    1. fetch_live_positions_valuation queries Yahoo prices for all current positions and compares
+       current position-level value to last value in the database (computing GBP and % changes + timestamp).
+    2. render_tab_live renders the position-level table, KPI metrics, and last query timestamp,
+       and is configured with a 60-second (1-minute) refresh interval.
+    """
+    from unittest.mock import patch, MagicMock
+    from portfolio_core.db import (
+        create_all_tables,
+        record_transaction,
+        fetch_live_positions_valuation,
+    )
+    try:
+        from src.ui.tab_live import (
+            render_tab_live,
+            format_live_positions_table,
+            LIVE_REFRESH_INTERVAL_SECONDS,
+        )
+    except ImportError:
+        from apps.dashboard.src.ui.tab_live import (
+            render_tab_live,
+            format_live_positions_table,
+            LIVE_REFRESH_INTERVAL_SECONDS,
+        )
 
+    assert LIVE_REFRESH_INTERVAL_SECONDS == 60
 
+    engine = sqlite_test_engine
+    create_all_tables(engine)
 
+    # Seed current positions: 10 NVDA (USD), 100 STAN.L (GBp pence)
+    record_transaction(ticker="NVDA", transaction_date="2026-08-20", quantity=10.0, engine=engine)
+    record_transaction(ticker="STAN.L", transaction_date="2026-08-20", quantity=100.0, engine=engine)
 
+    # Seed last DB prices:
+    # NVDA: $100.00 @ 0.80 USD/GBP = £80.00 -> Prev Value = 10 * £80 = £800.00
+    # STAN.L: 2000.00 GBp (pence) @ 0.01 = £20.00 -> Prev Value = 100 * £20 = £2,000.00
+    # Total Prev DB Value = £2,800.00
+    pd.DataFrame([
+        {"DATE": "2026-08-28", "TICKER": "NVDA", "CLOSE": 100.0, "CURRENCY": "USD"},
+        {"DATE": "2026-08-28", "TICKER": "STAN.L", "CLOSE": 2000.0, "CURRENCY": "GBp"},
+    ]).to_sql("ASSET_PRICES", con=engine, if_exists="append", index=False)
 
+    pd.DataFrame([
+        {"DATE": "2026-08-28", "FROM_CURRENCY": "USD", "TO_CURRENCY": "GBP", "RATE": 0.80},
+    ]).to_sql("FX_RATES", con=engine, if_exists="append", index=False)
 
+    # Mock Yahoo Finance live quotes:
+    # NVDA live: $110.00 @ 0.80 USD/GBP = £88.00 -> Current Value = 10 * £88 = £880.00 (+£80.00, +10.00%)
+    # STAN.L live: 1900.00 GBp @ 0.01 = £19.00 -> Current Value = 100 * £19 = £1,900.00 (-£100.00, -5.00%)
+    # Total Current Value = £2,780.00 (-£20.00, -0.7142857%)
+    def fake_yf_ticker(sym):
+        m = MagicMock()
+        idx = pd.to_datetime(["2026-08-29 14:30:00"])
+        if sym == "NVDA":
+            m.history.return_value = pd.DataFrame({"Close": [110.0]}, index=idx)
+            m.history_metadata = {"currency": "USD"}
+        elif sym == "STAN.L":
+            m.history.return_value = pd.DataFrame({"Close": [1900.0]}, index=idx)
+            m.history_metadata = {"currency": "GBp"}
+        elif sym == "USDGBP=X":
+            m.history.return_value = pd.DataFrame({"Close": [0.80]}, index=idx)
+            m.history_metadata = {"currency": "GBP"}
+        else:
+            m.history.return_value = pd.DataFrame()
+            m.history_metadata = {}
+        return m
 
+    with patch("portfolio_core.db.yf.Ticker", side_effect=fake_yf_ticker):
+        pos_df, meta = fetch_live_positions_valuation(engine=engine)
+
+        assert not pos_df.empty
+        assert len(pos_df) == 2
+        assert meta["positions_count"] == 2
+        assert meta["live_success_count"] == 2
+        assert meta["refresh_interval_seconds"] == 60
+        assert "query_timestamp" in meta and len(meta["query_timestamp"]) >= 19
+        assert np.isclose(meta["total_prev_value_gbp"], 2800.0)
+        assert np.isclose(meta["total_current_value_gbp"], 2780.0)
+        assert np.isclose(meta["total_change_gbp"], -20.0)
+        assert np.isclose(meta["total_change_pct"], (-20.0 / 2800.0) * 100.0)
+
+        nvda_row = pos_df[pos_df["TICKER"] == "NVDA"].iloc[0]
+        assert np.isclose(nvda_row["CURRENT_VALUE_GBP"], 880.0)
+        assert np.isclose(nvda_row["PREV_VALUE_GBP"], 800.0)
+        assert np.isclose(nvda_row["CHANGE_GBP"], 80.0)
+        assert np.isclose(nvda_row["CHANGE_PCT"], 10.0)
+
+        stan_row = pos_df[pos_df["TICKER"] == "STAN.L"].iloc[0]
+        assert np.isclose(stan_row["CURRENT_VALUE_GBP"], 1900.0)
+        assert np.isclose(stan_row["PREV_VALUE_GBP"], 2000.0)
+        assert np.isclose(stan_row["CHANGE_GBP"], -100.0)
+        assert np.isclose(stan_row["CHANGE_PCT"], -5.0)
+
+        formatted = format_live_positions_table(pos_df)
+        assert "Ticker" in formatted.columns
+        assert "Current Value (£)" in formatted.columns
+        assert "Previous End Value (£)" in formatted.columns
+        assert "Change (£)" in formatted.columns
+        assert "Change (%)" in formatted.columns
+        assert "Last Query" in formatted.columns
+
+        with patch("streamlit.dataframe") as mock_df, \
+             patch("streamlit.metric") as mock_metric, \
+             patch("streamlit.info") as mock_info, \
+             patch("streamlit.plotly_chart"):
+            render_tab_live(engine=engine, db_name="stocks_dev")
+            assert mock_df.called
+            assert mock_metric.called
+            assert mock_info.called
+            rendered_df = mock_df.call_args.args[0]
+            assert isinstance(rendered_df, pd.DataFrame)
+            assert len(rendered_df) == 2
+            assert set(["Ticker", "Current Value (£)", "Previous End Value (£)", "Change (£)", "Change (%)", "Last Query"]).issubset(rendered_df.columns)
