@@ -7,7 +7,7 @@ name = "portfolio-core"
 version = "0.1.0"
 description = "Shared financial analytics, Value-at-Risk engines, and database access layer"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "pandas>=3.1.0",
     "numpy>=2.5.4",

@@ -7,7 +7,7 @@ name = "portfolio-analytics-platform"
 version = "0.1.0"
 description = "Monorepo for Portfolio Risk Analytics, Dagster Orchestration, and Streamlit Dashboard"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = [
