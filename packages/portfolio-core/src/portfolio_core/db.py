@@ -1720,7 +1720,7 @@ def collect_and_store_dividend_cashflows_and_cash_account(backfill_days: int = 0
     tx_grid = tx_pivot.reindex(full_date_range).fillna(0).cumsum()
     
     holdings_long = tx_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="SHARES")
-    holdings_long.rename(columns={"index": "DATE"}, inplace=True)
+    holdings_long = holdings_long.rename(columns={"index": "DATE"})
     holdings_long = holdings_long[holdings_long["SHARES"] > 0]
     
     div_df = pd.merge(prices_merged, holdings_long, on=["DATE", "TICKER"], how="inner").sort_values(["DATE", "TICKER"])
@@ -1976,13 +1976,13 @@ def calculate_and_store_daily_portfolio_values(backfill_days: int = 0, engine=No
     tx_grid = tx_pivot.reindex(full_date_range).fillna(0).cumsum()
     
     holdings_long = tx_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="SHARES")
-    holdings_long.rename(columns={"index": "DATE"}, inplace=True)
+    holdings_long = holdings_long.rename(columns={"index": "DATE"})
     holdings_long = holdings_long[holdings_long["SHARES"] != 0]
     
     # Forward-fill & backward-fill price matrix across all calendar dates to guarantee 100% complete price coverage
     price_grid = prices_merged.pivot_table(index="DATE", columns="TICKER", values="CLOSE_GBP").sort_index().ffill().bfill().reindex(full_date_range).ffill().bfill()
     prices_ffilled = price_grid.reset_index().melt(id_vars="index", var_name="TICKER", value_name="CLOSE_GBP")
-    prices_ffilled.rename(columns={"index": "DATE"}, inplace=True)
+    prices_ffilled = prices_ffilled.rename(columns={"index": "DATE"})
     prices_ffilled = prices_ffilled.dropna(subset=["CLOSE_GBP"])
 
     val_df = pd.merge(prices_ffilled, holdings_long, on=["DATE", "TICKER"], how="inner")
