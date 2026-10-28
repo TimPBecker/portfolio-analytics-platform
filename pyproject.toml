@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "portfolio-analytics-platform"
 version = "0.1.0"
 description = "Monorepo for Portfolio Risk Analytics, Dagster Orchestration, and Streamlit Dashboard"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -16,3 +16,13 @@ testpaths = [
     "apps/dashboard/tests"
 ]
 python_files = ["test_*.py"]
+filterwarnings = [
+    "ignore::DeprecationWarning:yfinance.*",
+    "ignore:The inplace keyword in DataFrame.*:DeprecationWarning",
+    "ignore:.*punycode.*:DeprecationWarning",
+    "ignore::DeprecationWarning:anyio.*",
+    "ignore::pytest.PytestRemovedIn10Warning",
+    "ignore::DeprecationWarning:dagster.*",
+    "ignore::DeprecationWarning:dask.*",
+    "ignore::DeprecationWarning:distributed.*",
+]
