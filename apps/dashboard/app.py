@@ -40,6 +40,7 @@ try:
     from src.ui.tab_transactions import render_tab_transactions
     from src.ui.tab_backtesting import render_tab_backtesting
     from src.ui.tab_market_data import render_tab_market_data
+    from src.ui.tab_live import render_tab_live
 except ImportError:
     from apps.dashboard.src.ui.theme import inject_custom_css, ensure_sidebar_collapsed
     from apps.dashboard.src.ui.tab_volatility import render_tab_volatility
@@ -50,6 +51,7 @@ except ImportError:
     from apps.dashboard.src.ui.tab_transactions import render_tab_transactions
     from apps.dashboard.src.ui.tab_backtesting import render_tab_backtesting
     from apps.dashboard.src.ui.tab_market_data import render_tab_market_data
+    from apps.dashboard.src.ui.tab_live import render_tab_live
 
 
 
@@ -349,8 +351,9 @@ def run_dashboard():
     st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 
     # Main Navigation Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "💼 Portfolio Holdings & Valuation",
+        "⚡ Live Valuation",
         "🎯 Benchmarking",
         "🛡️ Value-at-Risk Spectrum",
         "🔬 VaR Backtesting",
@@ -372,6 +375,14 @@ def run_dashboard():
         )
 
     with tab2:
+        render_tab_live(
+            prices_gbp=prices_gbp,
+            positions=positions,
+            engine=active_engine,
+            db_name=selected_db
+        )
+
+    with tab3:
         render_tab_benchmarks(
             prices_gbp=prices_gbp,
             asof_date=selected_date,
@@ -381,7 +392,7 @@ def run_dashboard():
             pv_df=pv_df
         )
 
-    with tab3:
+    with tab4:
         render_tab_var(
             prices_gbp=prices_gbp,
             positions=positions,
@@ -389,7 +400,7 @@ def run_dashboard():
             engine=active_engine
         )
 
-    with tab4:
+    with tab5:
         render_tab_backtesting(
             prices_gbp=prices_gbp,
             positions=positions,
@@ -397,7 +408,7 @@ def run_dashboard():
             engine=active_engine
         )
 
-    with tab5:
+    with tab6:
         render_tab_returns(
             prices_gbp=prices_gbp,
             available_tickers=available_tickers,
@@ -407,21 +418,21 @@ def run_dashboard():
             asof_date=selected_date
         )
 
-    with tab6:
+    with tab7:
         render_tab_volatility(
             prices_gbp=prices_gbp,
             available_tickers=available_tickers,
             raw_prices_cache=raw_prices_cache
         )
 
-    with tab7:
+    with tab8:
         render_tab_transactions(
             engine=active_engine,
             transactions_df=transactions_df,
             positions_dict=positions
         )
 
-    with tab8:
+    with tab9:
         render_tab_market_data(
             engine=active_engine,
             db_name=selected_db,
